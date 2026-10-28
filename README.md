@@ -63,6 +63,7 @@ shoulder reads the session logs that the agents already write. You do not config
 | Codex | `~/.codex/sessions/` | `CODEX_HOME` |
 | Gemini CLI | `~/.gemini/tmp/` | `GEMINI_CLI_HOME` |
 | opencode 2.x | `~/.local/share/opencode/opencode.db` | `XDG_DATA_HOME` |
+| pi | `~/.pi/agent/sessions/` | `PI_CODING_AGENT_DIR` |
 
 shoulder only reads. It does not send input to an agent, it does not change files, and it does not connect to the network. It opens the opencode database read-only.
 

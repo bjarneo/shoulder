@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Watch pi sessions alongside Claude Code, Codex, Gemini CLI and opencode.
+
 ## v0.1.0 · 2026-10-27
 
 The first release of shoulder. It follows your coding agents through your project, live, in your terminal.
