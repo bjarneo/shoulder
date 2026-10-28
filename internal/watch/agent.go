@@ -1,5 +1,5 @@
 // Package watch reads the session logs of coding agents and turns them into
-// one event model. It supports Claude Code, Codex, Gemini CLI and opencode.
+// one event model. It supports Claude Code, Codex, Gemini CLI, opencode and omp.
 package watch
 
 import (
