@@ -29,6 +29,13 @@ To verify a download, compare it with `checksums.txt` in the release:
 sha256sum -c checksums.txt --ignore-missing
 ```
 
+With Nix, run shoulder from the flake, or enter a shell with Go and its tools for development:
+
+```sh
+nix run github:bjarneo/shoulder
+nix develop
+```
+
 ## Run
 
 Run shoulder in the project where your agents work:
