@@ -53,7 +53,7 @@ func New(opt Options) *Watcher {
 func (w *Watcher) init() {
 	w.sessions = map[string]*session{}
 	w.notes = map[string]string{}
-	w.sources = []source{newClaude(), newCodex(), newGemini(), newOpencode()}
+	w.sources = []source{newClaude(), newCodex(), newGemini(), newOpencode(), newPi()}
 }
 
 // Reload drops all state and reads the sessions again.

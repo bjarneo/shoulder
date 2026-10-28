@@ -120,7 +120,7 @@ func toolEvents(name string, in args, cwd string, st toolStyle) []Event {
 	case "edit", "replace", "str_replace", "str_replace_editor", "search_replace", "edit_file":
 		e.Kind = KindEdit
 		e.File = path("file_path", "filePath", "absolute_path", "path")
-		oldS, newS := in.str("old_string", "oldString", "old_str"), in.str("new_string", "newString", "new_str")
+		oldS, newS := in.str("old_string", "oldString", "old_str", "oldText"), in.str("new_string", "newString", "new_str", "newText")
 		e.Add, e.Del = changedLines(oldS, newS)
 		e.Needle = newS
 	case "multiedit", "multi_edit":
@@ -169,11 +169,11 @@ func toolEvents(name string, in args, cwd string, st toolStyle) []Event {
 			cwd = absPath(wd, cwd)
 		}
 		return []Event{shellEvent(e, cmd, cwd)}
-	case "grep", "search_file_content", "grep_search", "grep_files", "rg", "search":
+	case "grep", "search_file_content", "grep_search", "grep_files", "rg", "search", "ffgrep":
 		e.Kind = KindGrep
 		e.Query = in.str("pattern", "query", "regex")
 		e.Text = in.str("path", "dir_path", "include", "glob")
-	case "glob", "find_files", "file_search":
+	case "glob", "find_files", "file_search", "fffind":
 		e.Kind = KindGrep
 		e.Query = in.str("pattern", "glob", "query")
 		e.Text = "files"
