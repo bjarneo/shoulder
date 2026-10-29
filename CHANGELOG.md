@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.3.1 · 2026-10-29
 
 - `e` opens the file in one buffer at the cursor line when `EDITOR` is `omarchy-launch-editor`. Before, Neovim opened an empty buffer named `+LINE` and the file in a second buffer.
 
