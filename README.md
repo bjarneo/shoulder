@@ -108,6 +108,8 @@ To hide the agents that are done, press `x` or start with `--hide-done`. An agen
 
 To open the file at the cursor in your editor, press `e`. shoulder gives the terminal to the editor and comes back when the editor closes. Most terminal editors get `+LINE FILE`. `zed`, `hx` and `subl` get `FILE:LINE`. VS Code and Cursor get `-g FILE:LINE`.
 
+When `EDITOR` is `omarchy-launch-editor`, shoulder runs the editor that Omarchy selects. The wrapper puts `--` before its arguments, so the editor would read `+LINE` as a file name.
+
 To copy `path:line` of the cursor, press `y`. The copy uses OSC 52. In tmux, add `set -g set-clipboard on` to your tmux configuration.
 
 ## History

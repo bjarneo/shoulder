@@ -9,7 +9,10 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"runtime/debug"
+	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -140,9 +143,35 @@ func defaults(set map[string]bool, cfg config.Config, since *time.Duration, all 
 // EDITOR, then vi.
 func editor(cfg config.Config) string {
 	for _, e := range []string{cfg.Editor, os.Getenv("VISUAL"), os.Getenv("EDITOR")} {
-		if e != "" {
-			return e
+		if e == "" {
+			continue
 		}
+		// omarchy-launch-editor puts "--" before its arguments, so the
+		// editor reads "+LINE" as a file name. Run the editor that Omarchy
+		// selects instead.
+		if f := strings.Fields(e); len(f) > 0 && filepath.Base(f[0]) == "omarchy-launch-editor" {
+			return omarchyEditor()
+		}
+		return e
 	}
 	return "vi"
+}
+
+// omarchyEditor returns the editor that Omarchy selects, the way
+// omarchy-launch-editor finds it: the first line of its defaults file, or
+// nvim when the file is missing or the editor is not installed.
+func omarchyEditor() string {
+	h, _ := os.UserHomeDir()
+	ed := ""
+	if b, err := os.ReadFile(filepath.Join(h, ".local", "state", "omarchy", "defaults", "editor")); err == nil {
+		ed, _, _ = strings.Cut(string(b), "\n")
+		ed = strings.TrimSpace(ed)
+	}
+	if ed == "sublime_text" {
+		ed = "subl"
+	}
+	if _, err := exec.LookPath(ed); ed == "" || err != nil {
+		ed = "nvim"
+	}
+	return ed
 }

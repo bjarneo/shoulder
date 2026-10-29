@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- `e` opens the file in one buffer at the cursor line when `EDITOR` is `omarchy-launch-editor`. Before, Neovim opened an empty buffer named `+LINE` and the file in a second buffer.
+
 ## v0.3.0 · 2026-10-29
 
 shoulder now lets you hide finished agents, step through the history of an agent, open files in your editor, and show the agents in a status bar.
