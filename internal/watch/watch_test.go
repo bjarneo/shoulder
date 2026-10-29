@@ -454,3 +454,214 @@ func TestLongCommandWithReadsIsRunning(t *testing.T) {
 		t.Fatalf("got %+v", act)
 	}
 }
+
+func TestAuggieSession(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".augment", "sessions")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ide := func(root string) string {
+		return `{"id":2,"type":4,"ide_state_node":{"workspace_folders":[{"repository_root":"` + root + `","folder_root":"` + root + `"}]}}`
+	}
+	first := `{"completed":true,"finishedAt":"2026-10-29T10:00:01.000Z","exchange":{"request_message":"fix add","response_text":"","request_nodes":[{"id":1,"type":0,"text_node":{"content":"fix add"}},` + ide("/w") + `],"response_nodes":[` +
+		`{"id":1,"type":5,"tool_use":{"tool_use_id":"t1","tool_name":"view","input_json":"{\"path\":\"calc.go\",\"view_range\":[3,5]}","started_at_ms":1793268001000}},` +
+		`{"id":2,"type":5,"tool_use":{"tool_use_id":"t2","tool_name":"str-replace-editor","input_json":"{\"command\":\"str_replace\",\"path\":\"calc.go\",\"old_str_1\":\"a - b\",\"new_str_1\":\"a + b\",\"old_str_start_line_number_1\":4}"}},` +
+		`{"id":3,"type":5,"tool_use":{"tool_use_id":"t3","tool_name":"launch-process","input_json":"{\"command\":\"go test ./...\",\"cwd\":\"/w\",\"wait\":true}"}},` +
+		`{"id":4,"type":10,"token_usage":{"input_tokens":4,"cache_read_input_tokens":20000,"cache_creation_input_tokens":300}}]}}`
+	second := `{"completed":true,"finishedAt":"2026-10-29T10:00:05.000Z","exchange":{"request_message":"","response_text":"The test fails.","request_nodes":[` + ide("/w") + `,` +
+		`{"id":1,"type":1,"tool_result_node":{"tool_use_id":"t1","content":"package main","is_error":false}},` +
+		`{"id":2,"type":1,"tool_result_node":{"tool_use_id":"t2","content":"Successfully edited the file calc.go.","is_error":false}},` +
+		`{"id":3,"type":1,"tool_result_node":{"tool_use_id":"t3","content":"Here are the results from executing the command.\n<return-code>\n1\n</return-code>\n<output>\nFAIL calc\n</output>","is_error":true}}],` +
+		`"response_nodes":[{"id":0,"type":0,"content":"The test fails."}]}}`
+	write := func(name string, items ...string) string {
+		t.Helper()
+		path := filepath.Join(dir, name+".json")
+		body := `{"sessionId":"` + name + `","title":"Fix add","chatHistory":[` + strings.Join(items, ",") + `]}`
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	path := write("a1", first)
+	other := strings.ReplaceAll(first, `"/w"`, `"/x"`)
+	write("b2", other)
+
+	w := New(Options{Root: "/w", Since: time.Hour})
+	src := newAuggie()
+	src.scan(w, time.Now().Add(-time.Hour))
+	if len(w.sessions) != 1 {
+		t.Fatalf("sessions: %v", w.sessions)
+	}
+	s := w.sessions["auggie:"+path]
+	if s == nil || s.Cwd != "/w" {
+		t.Fatalf("session: %+v", s)
+	}
+	if err := s.h.poll(s); err != nil {
+		t.Fatal(err)
+	}
+	if s.Title != "Fix add" || s.Prompt != "fix add" || s.Ctx != 20304 {
+		t.Fatalf("title %q prompt %q ctx %d", s.Title, s.Prompt, s.Ctx)
+	}
+	if e := s.Events[1]; e.Kind != KindRead || e.File != "/w/calc.go" || e.Line != 2 || e.EndLine != 4 || !e.Time.Equal(time.UnixMilli(1793268001000)) {
+		t.Fatalf("view: %+v", e)
+	}
+	if e := s.Events[2]; e.Kind != KindEdit || e.Tool != "str-replace-editor" || e.Add != 1 || e.Del != 1 || e.Line != 3 || e.Needle != "a + b" {
+		t.Fatalf("edit: %+v", e)
+	}
+	if e := s.Events[3]; e.Kind != KindRun || e.Cmd != "go test ./..." || e.Result != Pending {
+		t.Fatalf("run: %+v", e)
+	}
+	if act := s.Activity(time.Date(2026, 10, 29, 10, 0, 2, 0, time.UTC)); act.Status != Active || act.Act != "running" {
+		t.Fatalf("act: %+v", act)
+	}
+
+	write("a1", first, second)
+	if err := s.h.poll(s); err != nil {
+		t.Fatal(err)
+	}
+	var kinds []Kind
+	for _, e := range s.Events {
+		kinds = append(kinds, e.Kind)
+	}
+	want := []Kind{KindYou, KindRead, KindEdit, KindRun, KindSay, KindDone}
+	if strings.Join(kindStrings(kinds), ",") != strings.Join(kindStrings(want), ",") {
+		t.Fatalf("kinds: %v", kinds)
+	}
+	if e := s.Events[3]; e.Result != Failed || e.Exit != 1 || e.Summary() != "✗ exit 1" || strings.Join(e.Output, "|") != "FAIL calc" {
+		t.Fatalf("run result: %+v", e)
+	}
+	if !s.TurnEnded || s.Events[len(s.Events)-1].Text != "The test fails." {
+		t.Fatalf("turn end: %+v", s.Events[len(s.Events)-1])
+	}
+
+	// A file that auggie is rewriting does not drop the events.
+	if err := os.WriteFile(path, []byte(`{"sessionId":"a1","chatHis`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.h.poll(s); err != nil || len(s.Events) != len(want) {
+		t.Fatalf("partial file: %v %+v", err, s.Events)
+	}
+}
+
+func TestAuggieSubagent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "s1.json")
+	call := `{"completed":true,"finishedAt":"2026-10-29T10:00:01.000Z","exchange":{"request_message":"use a sub-agent to read calc.go","response_text":"","request_nodes":[{"id":1,"type":4,"ide_state_node":{"workspace_folders":[{"repository_root":"/w","folder_root":"/w"}]}}],"response_nodes":[` +
+		`{"id":1,"type":5,"tool_use":{"tool_use_id":"t1","tool_name":"sub-agent-explore","input_json":"{\"action\":\"run\",\"name\":\"read-files\",\"instruction\":\"Read calc.go and report what it contains.\"}","started_at_ms":1793268001000}}]}}`
+	reply := `{"completed":true,"finishedAt":"2026-10-29T10:00:30.000Z","exchange":{"request_message":"","response_text":"calc.go defines add.","request_nodes":[` +
+		`{"id":1,"type":1,"tool_result_node":{"tool_use_id":"t1","content":"## Summary\n\ncalc.go defines add(a, b int) int.","is_error":false}}],` +
+		`"response_nodes":[{"id":0,"type":0,"content":"calc.go defines add."}]}}`
+	write := func(items ...string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(`{"sessionId":"s1","chatHistory":[`+strings.Join(items, ",")+`]}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(call)
+	h := &auggieHandle{path: path}
+	s := newSession("auggie:s1", "auggie", h)
+	s.Cwd = "/w"
+	if err := h.poll(s); err != nil {
+		t.Fatal(err)
+	}
+	if e := s.Events[1]; e.Kind != KindTask || e.Tool != "sub-agent-explore" || e.Text != "read-files" || e.Result != Pending {
+		t.Fatalf("task: %+v", e)
+	}
+	// The subagent works longer than the approval estimate, and stays active.
+	if act := s.Activity(time.Date(2026, 10, 29, 10, 0, 25, 0, time.UTC)); act.Status != Active || act.Act != "delegating" {
+		t.Fatalf("act: %+v", act)
+	}
+	write(call, reply)
+	if err := h.poll(s); err != nil {
+		t.Fatal(err)
+	}
+	var kinds []Kind
+	for _, e := range s.Events {
+		kinds = append(kinds, e.Kind)
+	}
+	want := []Kind{KindYou, KindTask, KindSay, KindDone}
+	if strings.Join(kindStrings(kinds), ",") != strings.Join(kindStrings(want), ",") {
+		t.Fatalf("kinds: %v", kinds)
+	}
+	if e := s.Events[1]; e.Result != OK || e.Summary() != "✓ ok" {
+		t.Fatalf("task result: %+v", e)
+	}
+	if !s.TurnEnded || s.Events[3].Text != "calc.go defines add." {
+		t.Fatalf("turn end: %+v", s.Events[3])
+	}
+}
+
+func TestAuggieTools(t *testing.T) {
+	cases := []struct {
+		name, input string
+		kind        Kind
+		file        string
+		from, to    int
+		add, del    int
+		text        string
+	}{
+		{"view", `{"path":"a.go"}`, KindRead, "/w/a.go", 0, -1, 0, 0, ""},
+		{"view", `{"path":"a.go","view_range":[10,-1]}`, KindRead, "/w/a.go", 9, -1, 0, 0, ""},
+		{"view", `{"path":"src","type":"directory"}`, KindList, "", -1, -1, 0, 0, "src"},
+		{"save-file", `{"path":"new.md","file_content":"one\ntwo\n"}`, KindEdit, "/w/new.md", 0, 1, 2, 0, "write"},
+		{"str-replace-editor", `{"command":"str_replace","path":"a.go","old_str_1":"a","new_str_1":"b\nc","old_str_2":"x\ny","new_str_2":"z"}`, KindEdit, "/w/a.go", -1, -1, 3, 3, ""},
+		{"str-replace-editor", `{"command":"insert","path":"a.go","insert_line_1":7,"new_str_1":"// note"}`, KindEdit, "/w/a.go", 6, -1, 1, 0, ""},
+		{"launch-process", `{"command":"cat notes.txt","cwd":"/w/sub","wait":true}`, KindRead, "/w/sub/notes.txt", 0, -1, 0, 0, ""},
+		{"grep-search", `{"query":"func add","directory_absolute_path":"/w"}`, KindGrep, "", -1, -1, 0, 0, "/w"},
+		{"codebase-retrieval", `{"information_request":"where is add defined"}`, KindGrep, "", -1, -1, 0, 0, ""},
+		{"web-fetch", `{"url":"https://go.dev"}`, KindWeb, "", -1, -1, 0, 0, "https://go.dev"},
+		{"web-search", `{"query":"bubbletea"}`, KindWeb, "", -1, -1, 0, 0, "bubbletea"},
+		{"update_tasks", `{}`, KindPlan, "", -1, -1, 0, 0, "plan"},
+		{"sub-agent-explore", `{"action":"run","name":"read-files","instruction":"Read calc.go."}`, KindTask, "", -1, -1, 0, 0, "read-files"},
+		{"sub-agent-explore", `{"action":"run","instruction":"Read calc.go."}`, KindTask, "", -1, -1, 0, 0, "Read calc.go."},
+		{"read-process", `{"terminal_id":3}`, KindTool, "", -1, -1, 0, 0, "read-process"},
+	}
+	for _, c := range cases {
+		evs := auggieEvents(c.name, decodeArgs([]byte(c.input)), "/w")
+		if len(evs) != 1 {
+			t.Errorf("%s %s: got %d events", c.name, c.input, len(evs))
+			continue
+		}
+		e := evs[0]
+		if e.Kind != c.kind || e.File != c.file || e.Tool != c.name || e.Add != c.add || e.Del != c.del || e.Text != c.text {
+			t.Errorf("%s %s: got %+v", c.name, c.input, e)
+			continue
+		}
+		if e.File != "" && (e.Line != c.from || e.EndLine != c.to) {
+			t.Errorf("%s %s: got lines %d-%d", c.name, c.input, e.Line, e.EndLine)
+		}
+	}
+	evs := auggieEvents("remove-files", decodeArgs([]byte(`{"file_paths":["a.go","/w/b.go"]}`)), "/w")
+	if len(evs) != 2 || evs[0].File != "/w/a.go" || !evs[0].Deleted || evs[1].File != "/w/b.go" {
+		t.Fatalf("remove-files: %+v", evs)
+	}
+}
+
+func TestAuggieResult(t *testing.T) {
+	cases := []struct {
+		content string
+		isErr   bool
+		result  Result
+		exit    int
+		out     string
+	}{
+		{"Here are the results from executing the command.\n<return-code>\n0\n</return-code>\n<output>\nok\n</output>", false, OK, 0, "ok"},
+		{"Here are the results from executing the command. <return-code> 2 </return-code> <output> no such file </output>", true, Failed, 2, "no such file"},
+		{"Command may still be running. You can use read-process to get more output. Terminal ID 4 Output so far: <output> building </output>", false, Pending, 0, ""},
+		{"Process launched with terminal ID 5", false, OK, 0, "Process launched with terminal ID 5"},
+		{"Failed to launch process: no shell", true, Failed, 1, "Failed to launch process: no shell"},
+	}
+	for _, c := range cases {
+		e := Event{Kind: KindRun}
+		auggieResult(&e, &augResult{Content: c.content, IsError: c.isErr})
+		if e.Result != c.result || e.Exit != c.exit || strings.Join(e.Output, "|") != c.out {
+			t.Errorf("%q: got result %d exit %d output %q", c.content, e.Result, e.Exit, e.Output)
+		}
+	}
+	e := Event{Kind: KindEdit}
+	auggieResult(&e, &augResult{Content: "Failed to edit", IsError: true})
+	if e.Result != Failed {
+		t.Fatalf("edit result: %+v", e)
+	}
+}

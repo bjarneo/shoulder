@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Watch Auggie (Augment CLI) sessions in `~/.augment/sessions/`.
+
 ## v0.3.2 · 2026-10-31
 
 This release fixes a crash, the Nix build, and agent states that did not change. It also makes the screen easier to read.

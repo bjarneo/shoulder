@@ -1,7 +1,7 @@
 // shoulder shows what coding agents do in a project, live: the files they
 // read and edit, the commands they run, and the diff against the last commit.
-// It reads the session logs of Claude Code, Codex, Gemini CLI, opencode and
-// omp.
+// It reads the session logs of Claude Code, Codex, Gemini CLI, Auggie, opencode
+// and omp.
 package main
 
 import (
@@ -42,7 +42,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "       shoulder status [flags] [dir]")
 		fmt.Fprintln(os.Stderr)
 		fmt.Fprintln(os.Stderr, "Watch the coding agents that work in dir, or in the current directory.")
-		fmt.Fprintln(os.Stderr, "shoulder reads the sessions of Claude Code, Codex, Gemini CLI, opencode and omp.")
+		fmt.Fprintln(os.Stderr, "shoulder reads the sessions of Claude Code, Codex, Gemini CLI, Auggie, opencode and omp.")
 		fmt.Fprintln(os.Stderr, "shoulder status prints one line about the agents, for a status bar.")
 		fmt.Fprintln(os.Stderr)
 		flag.PrintDefaults()

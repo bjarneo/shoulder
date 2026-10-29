@@ -2,7 +2,7 @@
 
 **Watch over your agents' shoulder.**
 
-See your coding agents work, live. shoulder follows Claude Code, Codex, Gemini CLI, opencode and omp through your project. It shows the file that each agent reads or edits, the diff against your last commit, and the commands that it runs.
+See your coding agents work, live. shoulder follows Claude Code, Codex, Gemini CLI, Auggie, opencode and omp through your project. It shows the file that each agent reads or edits, the diff against your last commit, and the commands that it runs.
 
 [![Claude simplifies snake.js one line at a time while Codex adds tests. shoulder follows both.](site/poster.jpg)](https://bjarneo.github.io/shoulder/)
 
@@ -86,6 +86,7 @@ shoulder reads the session logs that the agents already write. You do not config
 | Claude Code, with subagents | `~/.claude/projects/` | `CLAUDE_CONFIG_DIR` |
 | Codex | `~/.codex/sessions/` | `CODEX_HOME` |
 | Gemini CLI | `~/.gemini/tmp/` | `GEMINI_CLI_HOME` |
+| Auggie (Augment CLI) | `~/.augment/sessions/` | — |
 | opencode 2.x | `~/.local/share/opencode/opencode.db` | `XDG_DATA_HOME` |
 | omp | `~/.omp/agent/sessions/` | `PI_CODING_AGENT_DIR` |
 
@@ -293,8 +294,10 @@ In a git repository, shoulder compares each file with `HEAD`. Outside git, it co
 ## Limits
 
 - shoulder reads opencode 2.x. It does not read the older `part` tables of opencode 1.x.
-- For Claude Code, Codex, opencode and omp, the approval state is an estimate. See [Agent states](#agent-states).
+- For Claude Code, Codex, Auggie, opencode and omp, the approval state is an estimate. See [Agent states](#agent-states).
 - When omp moves a command to the background, shoulder shows it as running until omp writes the output of the finished job.
+- Auggie saves its session after each model response, so shoulder sees a tool call when the response ends, and its result when the next response ends.
+- shoulder reads Auggie sessions only in `~/.augment/`. It does not find the sessions of an auggie that runs with `--augment-cache-dir`.
 - shoulder finds edits through the shell only for files in the `git status` of this project. When you edit a file in your editor while an agent runs a command, the edit also goes to that agent.
 - In all projects, `FILES` shows the git changes of this project only. For the other projects, it shows the files that agents edited.
 - The binaries are for Linux and macOS. shoulder is not tested on Windows.

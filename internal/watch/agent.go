@@ -1,5 +1,6 @@
 // Package watch reads the session logs of coding agents and turns them into
-// one event model. It supports Claude Code, Codex, Gemini CLI, opencode and omp.
+// one event model. It supports Claude Code, Codex, Gemini CLI, Auggie, opencode
+// and omp.
 package watch
 
 import (
@@ -66,7 +67,7 @@ type Event struct {
 // Agent is one agent session.
 type Agent struct {
 	Key    string // stable identity, unique across sources
-	Source string // claude, codex, gemini or opencode
+	Source string // claude, codex, gemini, auggie, opencode or omp
 	Name   string // short label, such as "claude" or a subagent type
 	Title  string // session title, when the agent writes one
 	Prompt string // first prompt in the visible part of the log
