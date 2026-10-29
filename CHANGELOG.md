@@ -1,8 +1,10 @@
 # Changelog
 
-## Unreleased
+## v0.2.0 · 2026-10-29
 
-- Change the keys in `~/.config/shoulder/config.toml`. The help screen and the sidebar show your keys. See [Change the keys](README.md#change-the-keys). (#4)
+shoulder now follows agents through the shell, watches all projects, and lets you change the keys.
+
+- Change the keys in `~/.config/shoulder/config.toml`. The help screen and the sidebar show your keys. See [Change the keys](https://github.com/bjarneo/shoulder#change-the-keys). (#4)
 - Watch the agents of all projects. Press `A`, or start shoulder with `--all`. Each agent row shows the project of the agent.
 - Follow edits through the shell. When a file changes on disk while an agent runs a command, such as `sed -i` or a script, the view goes to that agent and the changed lines.
 - A command with more parts, such as `cat a.go && sed -n 1,80p b.go`, gives a read for each file.
