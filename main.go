@@ -13,6 +13,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/bjarneo/shoulder/internal/config"
 	"github.com/bjarneo/shoulder/internal/repo"
 	"github.com/bjarneo/shoulder/internal/ui"
 	"github.com/bjarneo/shoulder/internal/watch"
@@ -30,9 +31,12 @@ func main() {
 		fmt.Fprintln(os.Stderr, "Usage: shoulder [flags] [dir]")
 		fmt.Fprintln(os.Stderr)
 		fmt.Fprintln(os.Stderr, "Watch the coding agents that work in dir, or in the current directory.")
-		fmt.Fprintln(os.Stderr, "shoulder reads the sessions of Claude Code, Codex, Gemini CLI and opencode.")
+		fmt.Fprintln(os.Stderr, "shoulder reads the sessions of Claude Code, Codex, Gemini CLI, opencode and omp.")
 		fmt.Fprintln(os.Stderr)
 		flag.PrintDefaults()
+		p, _ := config.Path()
+		fmt.Fprintln(os.Stderr)
+		fmt.Fprintln(os.Stderr, "To change the keys, edit "+p+", or the file in SHOULDER_CONFIG.")
 	}
 	flag.Parse()
 	if *showVersion {
@@ -53,14 +57,25 @@ func main() {
 		os.Exit(2)
 	}
 
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "shoulder:", err)
+		os.Exit(2)
+	}
+	keys, err := ui.NewKeymap(cfg.Keys)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "shoulder: %s: %v\n", cfg.Path, err)
+		os.Exit(2)
+	}
+
 	r := repo.Open(dir)
 	w := watch.New(watch.Options{Root: r.Root, Since: *since})
-	m := ui.New(r, w, ui.Options{Splits: *splits, Signs: *signs, Since: *since})
+	m := ui.New(r, w, ui.Options{Splits: *splits, Signs: *signs, Since: *since, Keys: keys})
 	p := tea.NewProgram(m)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go w.Run(ctx, func(s watch.Snapshot) { p.Send(ui.Snapshot(s)) })
-	_, err := p.Run()
+	_, err = p.Run()
 	cancel()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "shoulder:", err)

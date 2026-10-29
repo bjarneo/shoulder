@@ -21,6 +21,7 @@ type Options struct {
 	Splits bool // start with one split per agent
 	Signs  bool // show changes as signs instead of inline deleted lines
 	Since  time.Duration
+	Keys   *Keymap // nil for the default keys
 }
 
 // Model is the Bubble Tea model of the TUI.
@@ -29,6 +30,9 @@ type Model struct {
 	repo    *repo.Repo
 	watcher *watch.Watcher
 	theme   Theme
+	keys    *Keymap
+	side    [][2]string // the key list of the sidebar
+	helpTab [][2]string // the rows of the help screen
 	w, h    int
 	now     time.Time
 
@@ -135,8 +139,12 @@ type (
 // New creates the model. Run the watcher in the background and send its
 // snapshots with Snapshot.
 func New(r *repo.Repo, w *watch.Watcher, opt Options) *Model {
+	keys := opt.Keys
+	if keys == nil {
+		keys, _ = NewKeymap(nil)
+	}
 	return &Model{
-		opt: opt, repo: r, watcher: w,
+		opt: opt, repo: r, watcher: w, keys: keys, side: keys.sidebar(), helpTab: keys.help(),
 		follow: true, auto: true, splits: opt.Splits, inline: !opt.Signs,
 		ftop: map[string]ftop{}, sweeps: map[string]*sweep{}, lastRead: map[string]string{},
 		edits: map[string][2]int{}, rows: map[string]*rowCache{}, hl: map[string]*highlighted{},
@@ -336,7 +344,11 @@ func (m *Model) welcome() note {
 	if m.repo.State.Branch != "" {
 		where = " on " + m.repo.State.Branch
 	}
-	return note{m.repo.Name + " · " + plural(n, "agent") + where + " · ? for keys", m.theme.Dim()}
+	text := m.repo.Name + " · " + plural(n, "agent") + where
+	if k := m.keys.first(actHelp); k != "" {
+		text += " · " + k + " for keys"
+	}
+	return note{text, m.theme.Dim()}
 }
 
 // defaultFocus picks the agent with the newest edit in the project, or else
@@ -437,7 +449,11 @@ func (m *Model) pin(i int) tea.Cmd {
 		return nil
 	}
 	m.auto, m.want = false, nil
-	return m.flashNote(tag(i)+" is pinned · a turns auto focus on again", m.theme.Dim())
+	text := tag(i) + " is pinned"
+	if k := m.keys.first(actAuto); k != "" {
+		text += " · " + k + " turns auto focus on again"
+	}
+	return m.flashNote(text, m.theme.Dim())
 }
 
 // toggleAuto turns auto focus on or off. On, the focus goes to the newest
@@ -789,12 +805,11 @@ func (m *Model) flashNote(text string, c Color) tea.Cmd {
 	return tea.Tick(3500*time.Millisecond, func(time.Time) tea.Msg { return unflash(id) })
 }
 
-// key handles one key press.
+// key handles one key press. A key that starts a longer sequence waits in
+// m.pending for the next key.
 func (m *Model) key(k string) tea.Cmd {
-	n := len(m.snap.Agents)
 	if m.help {
-		switch k {
-		case "?", "esc", "q":
+		if a := m.keys.seqs[k]; k == "esc" || a == actHelp || a == actQuit {
 			m.help = false
 		}
 		return nil
@@ -802,81 +817,80 @@ func (m *Model) key(k string) tea.Cmd {
 	if k == "ctrl+c" {
 		return tea.Quit
 	}
-	if m.pending != "" {
-		p := m.pending
-		m.pending = ""
-		switch {
-		case p == "g" && k == "g":
-			m.moveU(-1 << 30)
-		case p == "g" && k == "t":
-			return m.cycleBuf(1)
-		case p == "g" && k == "T":
-			return m.cycleBuf(-1)
-		case (p == "]" || p == "[") && k == "c":
-			dir := 1
-			if p == "[" {
-				dir = -1
-			}
-			return m.hunk(dir)
-		}
-		return nil
+	if m.pending == "" && len(k) == 1 && k[0] >= '1' && k[0] <= '9' {
+		return m.pin(int(k[0] - '1'))
 	}
-	switch k {
-	case "ctrl+d", "pgdown":
+	seq := k
+	if m.pending != "" {
+		seq = m.pending + " " + k
+	}
+	m.pending = ""
+	if a, ok := m.keys.seqs[seq]; ok {
+		return m.do(a)
+	}
+	if m.keys.pre[seq] {
+		m.pending = seq
+	}
+	return nil
+}
+
+// do runs an action.
+func (m *Model) do(a action) tea.Cmd {
+	n := len(m.snap.Agents)
+	switch a {
+	case actPageDown:
 		m.moveU(m.codeRows() / 2)
-	case "ctrl+u", "pgup":
+	case actPageUp:
 		m.moveU(-m.codeRows() / 2)
-	case "1", "2", "3", "4", "5", "6", "7", "8", "9":
-		if i := int(k[0] - '1'); i < n {
-			return m.pin(i)
-		}
-	case "tab":
+	case actAgentNext:
 		if n > 0 {
 			return m.pin((max(0, m.focusIndex()) + 1) % n)
 		}
-	case "shift+tab":
+	case actAgentPrev:
 		if n > 0 {
 			return m.pin((max(0, m.focusIndex()) + n - 1) % n)
 		}
-	case "a":
+	case actAuto:
 		return m.toggleAuto()
-	case "f":
+	case actFollow:
 		if m.following() {
 			m.toNormal()
 		} else {
 			m.follow = true
 		}
-	case "esc":
+	case actBack:
 		m.follow = true
-	case "j", "down":
+	case actDown:
 		m.moveU(1)
-	case "k", "up":
+	case actUp:
 		m.moveU(-1)
-	case "G", "end":
-		m.moveU(1 << 30)
-	case "home":
+	case actTop:
 		m.moveU(-1 << 30)
-	case "L":
+	case actBottom:
+		m.moveU(1 << 30)
+	case actHunkNext:
+		return m.hunk(1)
+	case actHunkPrev:
+		return m.hunk(-1)
+	case actBufferNext:
 		return m.cycleBuf(1)
-	case "H":
+	case actBufferPrev:
 		return m.cycleBuf(-1)
-	case "g", "]", "[":
-		m.pending = k
-	case "s":
+	case actSplits:
 		m.ftop = map[string]ftop{}
 		m.splits = !m.splits
-	case "d":
+	case actInlineDiff:
 		m.inline = !m.inline
 		if m.view != nil {
 			m.scrollTo(m.view, true)
 		}
-	case "R":
+	case actReload:
 		m.watcher.Reload()
 		m.follow = true
 		return m.flashNote("reading all sessions again", m.theme.Dim())
-	case "?":
+	case actHelp:
 		m.help = true
-	case "q":
+	case actQuit:
 		return tea.Quit
 	}
 	return nil

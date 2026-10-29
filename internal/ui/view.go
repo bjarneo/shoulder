@@ -405,7 +405,7 @@ func (m *Model) drawSidebar(c *Canvas, x, y, w, h int) {
 		}
 	}
 	m.header(c, x, y, w, "AGENTS", "●"+strconv.Itoa(act)+" ○"+strconv.Itoa(wait)+" ✓"+strconv.Itoa(done))
-	keysH := len(sidebarKeys) + 2
+	keysH := len(m.side) + 2
 	need := n*3 - 1
 	if n == 0 {
 		need = 1
@@ -564,21 +564,10 @@ func (m *Model) drawFiles(c *Canvas, x, y, w, h int) {
 	}
 }
 
-var sidebarKeys = [][2]string{
-	{"1-9 tab", "pin agent"},
-	{"a", "auto focus"},
-	{"f esc", "free scroll / follow"},
-	{"j k gg G", "move"},
-	{"]c [c", "next / prev hunk"},
-	{"H L", "prev / next buffer"},
-	{"s", "split per agent"},
-	{"?", "all keys"},
-}
-
 func (m *Model) drawKeys(c *Canvas, x, y, w int) {
 	t := &m.theme
 	c.text(x+1, y, x+w-1, "KEYS", Style{FG: t.Dim(), Bold: true})
-	for i, k := range sidebarKeys {
+	for i, k := range m.side {
 		c.text(x+1, y+1+i, x+11, k[0], Style{FG: t.FG()})
 		c.text(x+11, y+1+i, x+w-1, k[1], Style{FG: t.Dim()})
 	}
@@ -1105,35 +1094,22 @@ func (m *Model) drawMsg(c *Canvas, y int) {
 	if m.flash != nil {
 		msg = *m.flash
 	}
-	right := "? keys"
+	right := ""
+	if k := m.keys.first(actHelp); k != "" {
+		right = k + " keys"
+	}
 	rx := m.w - 1 - width(right)
 	c.text(rx, y, m.w, right, Style{FG: t.Faint()})
 	if m.pending != "" {
-		rx -= 2 + width(m.pending)
-		c.text(rx, y, rx+width(m.pending), m.pending, Style{FG: t.FG()})
+		p := seqLabel(m.pending)
+		rx -= 2 + width(p)
+		c.text(rx, y, rx+width(p), p, Style{FG: t.FG()})
 	}
 	mc := msg.c
 	if mc == none {
 		mc = t.Dim()
 	}
 	c.text(1, y, rx-2, clip(msg.text, rx-3), Style{FG: mc})
-}
-
-var helpKeys = [][2]string{
-	{"1 … 9", "pin an agent and follow it"},
-	{"tab S-tab", "pin the next / previous agent"},
-	{"a", "auto focus: jump to new edits ↔ stay"},
-	{"f", "toggle follow / free scroll"},
-	{"esc", "back to follow"},
-	{"j k", "move cursor"},
-	{"C-d C-u", "half page down / up"},
-	{"gg G", "top / bottom of buffer"},
-	{"]c [c", "next / previous hunk"},
-	{"H L gT gt", "previous / next buffer"},
-	{"s", "follow layout ↔ one split per agent"},
-	{"d", "inline diff ↔ signs"},
-	{"R", "read all sessions again"},
-	{"q", "quit"},
 }
 
 func (m *Model) drawHelp(c *Canvas) {
@@ -1149,8 +1125,12 @@ func (m *Model) drawHelp(c *Canvas) {
 			st.Faint = true
 		}
 	}
-	w := min(58, m.w-4)
-	h := len(helpKeys) + 6
+	kw, tw := 12, 0
+	for _, k := range m.helpTab {
+		kw, tw = max(kw, width(k[0])+2), max(tw, width(k[1]))
+	}
+	w := min(max(58, 3+kw+tw+3), m.w-4)
+	h := len(m.helpTab) + 6
 	x := (m.w - w) / 2
 	y := max(0, (m.h-h)/2)
 	bg := t.Sunk()
@@ -1166,11 +1146,15 @@ func (m *Model) drawHelp(c *Canvas) {
 		c.text(x+w-1, yy, x+w, "│", bc)
 	}
 	c.text(x+3, y+1, x+w-2, "Keys · watch only", Style{FG: t.FG(), Bold: true})
-	for i, k := range helpKeys {
-		c.text(x+3, y+3+i, x+15, k[0], Style{FG: t.Key()})
-		c.text(x+15, y+3+i, x+w-2, k[1], Style{FG: t.Dim()})
+	for i, k := range m.helpTab {
+		c.text(x+3, y+3+i, x+3+kw, clip(k[0], kw-1), Style{FG: t.Key()})
+		c.text(x+3+kw, y+3+i, x+w-2, clip(k[1], w-5-kw), Style{FG: t.Dim()})
 	}
-	c.text(x+3, y+h-2, x+w-2, "? or esc to close", Style{FG: t.Faint()})
+	closeKeys := "esc"
+	if k := m.keys.label(actHelp); k != "" {
+		closeKeys = k + " or esc"
+	}
+	c.text(x+3, y+h-2, x+w-2, closeKeys+" to close", Style{FG: t.Faint()})
 	m.zones = m.zones[:0]
 	m.addZone(0, 0, m.w, m.h, func() tea.Cmd { m.help = false; return nil })
 }

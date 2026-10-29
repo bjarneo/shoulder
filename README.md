@@ -126,6 +126,43 @@ Gemini CLI logs when a tool call waits for approval. For the other agents, shoul
 
 You can also click an agent, a file, a tab or a split pane.
 
+### Change the keys
+
+To change a key, add a `[keys]` table to `~/.config/shoulder/config.toml`. To use a different file, set `XDG_CONFIG_HOME` or `SHOULDER_CONFIG`. Without the file, shoulder uses the default keys.
+
+```toml
+[keys]
+hunk_next = "n"
+hunk_prev = "p"
+top = ["gg", "home"]
+reload = []
+```
+
+- Give 1 key or an array of keys. An empty array removes all keys of the action.
+- Write a sequence of one-character keys without spaces, such as `gg` or `]c`. Put spaces between the keys of a longer sequence, such as `"ctrl+w j"` or `"g g g"`.
+- Write a named key the way Bubble Tea names it, such as `ctrl+n`, `alt+x`, `shift+tab`, `enter`, `space`, `pgdown` or `f5`.
+- When the config binds an action, the action loses its default keys. When another action has the same key by default, that action loses the key. A default sequence that starts with your key also goes away. For example, `top = "g"` removes `gt` and `gT`.
+- The keys `1` … `9` and `ctrl+c` do not change.
+
+shoulder stops with an error for an unknown action, an unknown key, or 2 actions on the same key. The help screen and the sidebar show the keys from your config.
+
+| Action | Default keys |
+|---|---|
+| `agent_next`, `agent_prev` | `tab`, `shift+tab` |
+| `auto` | `a` |
+| `follow` | `f` |
+| `back` | `esc` |
+| `down`, `up` | `j` `down`, `k` `up` |
+| `page_down`, `page_up` | `ctrl+d` `pgdown`, `ctrl+u` `pgup` |
+| `top`, `bottom` | `gg` `home`, `G` `end` |
+| `hunk_next`, `hunk_prev` | `]c`, `[c` |
+| `buffer_next`, `buffer_prev` | `L` `gt`, `H` `gT` |
+| `splits` | `s` |
+| `inline_diff` | `d` |
+| `reload` | `R` |
+| `help` | `?` |
+| `quit` | `q` |
+
 ## Colors
 
 shoulder uses the colors of your terminal theme. Text uses the default colors and the 16 ANSI colors, so it changes when you change the theme.

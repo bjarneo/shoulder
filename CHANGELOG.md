@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Change the keys in `~/.config/shoulder/config.toml`. The help screen and the sidebar show your keys. See [Change the keys](README.md#change-the-keys). (#4)
+- Watch omp sessions. (#3)
+- Run shoulder with Nix: `nix run github:bjarneo/shoulder`. (#2)
+- `go install` builds print the module version for `shoulder --version`.
+
 ## v0.1.0 · 2026-10-27
 
 The first release of shoulder. It follows your coding agents through your project, live, in your terminal.

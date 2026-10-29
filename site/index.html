@@ -210,6 +210,7 @@ pre .p { color: var(--amber); user-select: none; }
 .keys .grid { display: grid; grid-template-columns: 14ch minmax(0, 1fr); gap: 6px 20px; padding: 20px 24px 24px; font-size: 15px; }
 .keys kbd { font-family: var(--mono); color: var(--amber); }
 .keys span { color: var(--dim); }
+pre.keys { margin-top: 12px; }
 
 /* The footer is the status line of the app. */
 footer { margin-top: clamp(80px, 10vw, 128px); background: oklch(0.25 0.01 75); border-top: 1px solid var(--line); }
@@ -397,6 +398,10 @@ footer .wrap { display: flex; flex-wrap: wrap; align-items: stretch; min-height:
           <kbd>q</kbd><span>Quit</span>
         </div>
       </div>
+      <p class="note">To change a key, add a <code>[keys]</code> table to <code>~/.config/shoulder/config.toml</code>. The README lists <a href="https://github.com/bjarneo/shoulder#change-the-keys">all actions and their default keys</a>.</p>
+<pre class="keys"><code>[keys]
+hunk_next = "n"
+hunk_prev = "p"</code></pre>
     </div>
   </section>
 </main>
