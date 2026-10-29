@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## v0.3.0 · 2026-10-29
+
+shoulder now lets you hide finished agents, step through the history of an agent, open files in your editor, and show the agents in a status bar.
 
 - Hide the agents that are done. Press `x`, or start with `--hide-done`.
 - Open the file at the cursor in your editor with `e`, and copy `path:line` with `y`.
