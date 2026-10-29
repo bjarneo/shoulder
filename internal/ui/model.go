@@ -66,6 +66,10 @@ type Model struct {
 	hl       map[string]*highlighted
 	seen     map[string]time.Time
 	running  map[string]bool
+	runEnd   map[string]time.Time // when the result of a command showed up
+	mtimes   map[string]time.Time // the changed files and their times on disk
+	shell    map[string]shellEdit // by agent key
+	waiting  map[string]bool      // agents that wait for the user
 	tabs     []string
 	files    []fileRow
 	lastRows int
@@ -150,7 +154,8 @@ func New(r *repo.Repo, w *watch.Watcher, opt Options) *Model {
 		follow: true, auto: true, all: opt.All, splits: opt.Splits, inline: !opt.Signs,
 		ftop: map[string]ftop{}, sweeps: map[string]*sweep{}, lastRead: map[string]string{},
 		edits: map[string][2]int{}, rows: map[string]*rowCache{}, hl: map[string]*highlighted{},
-		seen: map[string]time.Time{}, running: map[string]bool{},
+		seen: map[string]time.Time{}, running: map[string]bool{}, runEnd: map[string]time.Time{},
+		shell: map[string]shellEdit{}, waiting: map[string]bool{},
 		msg: note{text: "reading agent sessions in " + r.Root + " …"},
 	}
 }
@@ -210,6 +215,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case repoMsg:
 		m.repo.Apply(repo.State(msg))
 		m.buildFiles()
+		m.scanChanges()
+		m.prepare()
+		m.autoStep()
 		return m, tea.Tick(2*time.Second, func(time.Time) tea.Msg { return repoAgain{} })
 	case repoAgain:
 		return m, m.refreshRepo()
@@ -217,6 +225,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// A jump that waited for the dwell time, or a focused agent that
 		// finished, moves the focus here.
 		m.prepare()
+		m.noteWaiting(false)
 		m.autoStep()
 		return m, tick()
 	case animMsg:
@@ -276,6 +285,7 @@ func (m *Model) apply(s watch.Snapshot) tea.Cmd {
 					m.running[k] = true
 				} else if m.running[k] {
 					delete(m.running, k)
+					m.runEnd[k] = m.now
 					if !first {
 						c := m.theme.Dim()
 						switch e.Result {
@@ -330,6 +340,7 @@ func (m *Model) apply(s watch.Snapshot) tea.Cmd {
 	if newest >= 0 {
 		m.want = &jumpTo{key: s.Agents[newest].Key, why: "edits " + m.rel(newestFile)}
 	}
+	m.noteWaiting(first)
 	m.autoStep()
 	m.buildTabs()
 	m.buildFiles()
@@ -432,18 +443,181 @@ func (m *Model) autoStep() {
 	if fi >= 0 && m.acts[fi].Status != watch.Done {
 		return
 	}
-	best := -1
+	// An agent that works comes before an agent that waits for the user.
+	best, rank := -1, 0
 	for i := range m.snap.Agents {
-		if m.acts[i].Status != watch.Active || !m.poss[i].ok || !m.inScope(m.poss[i].file) {
+		r := 0
+		switch {
+		case m.acts[i].Status == watch.Active && m.poss[i].ok && m.inScope(m.poss[i].file):
+			r = 2
+		case m.acts[i].Status == watch.Waiting && m.now.Sub(m.snap.Agents[i].Updated) < waitRecent:
+			r = 1
+		}
+		if r == 0 {
 			continue
 		}
-		if best < 0 || m.snap.Agents[i].Updated.After(m.snap.Agents[best].Updated) {
-			best = i
+		if r > rank || (r == rank && m.snap.Agents[i].Updated.After(m.snap.Agents[best].Updated)) {
+			best, rank = i, r
 		}
 	}
 	if best >= 0 && best != fi {
-		m.jump(best, m.acts[best].Act+" "+m.rel(m.poss[best].file))
+		why := m.acts[best].Act + " " + m.rel(m.poss[best].file)
+		if rank == 1 {
+			why = waitWhy(&m.snap.Agents[best], m.acts[best])
+		}
+		m.jump(best, why)
 	}
+}
+
+// waitRecent is the age of a wait that auto focus goes to. An agent that
+// waits for hours is not news.
+const waitRecent = 2 * time.Minute
+
+// noteWaiting asks auto focus to go to an agent that starts to wait for the
+// user: it asks a question, or a tool call waits for approval.
+func (m *Model) noteWaiting(first bool) {
+	for i := range m.snap.Agents {
+		a := &m.snap.Agents[i]
+		w := m.acts[i].Status == watch.Waiting
+		if w && !m.waiting[a.Key] && !first && m.now.Sub(a.Updated) < waitRecent {
+			m.want = &jumpTo{key: a.Key, why: waitWhy(a, m.acts[i])}
+		}
+		m.waiting[a.Key] = w
+	}
+}
+
+func waitWhy(a *watch.Agent, act watch.Activity) string {
+	if c := act.Cur; c >= 0 && a.Events[c].Kind == watch.KindAsk {
+		return "asks you"
+	}
+	for i := len(a.Events) - 1; i >= 0; i-- {
+		if e := &a.Events[i]; e.Kind == watch.KindAsk && e.Result == watch.Pending {
+			return "asks you"
+		}
+	}
+	return "waits for your approval"
+}
+
+// shellEdit is a change on disk that no edit tool call explains. It
+// happened while the agent ran a command, such as sed -i or a script.
+type shellEdit struct {
+	file string
+	at   time.Time // the time of the file on disk
+	seen time.Time // when shoulder saw the change
+}
+
+// maxScan is the largest number of changed files that scanChanges checks.
+const maxScan = 200
+
+// scanChanges looks for changed files in git that changed on disk since the
+// last scan. A change that no edit tool call explains goes to the agent that
+// ran a command at that time, so that the view follows edits through the
+// shell.
+func (m *Model) scanChanges() {
+	first := m.mtimes == nil
+	if first {
+		m.mtimes = map[string]time.Time{}
+	}
+	if len(m.repo.State.Changes) > maxScan {
+		return
+	}
+	for rel, c := range m.repo.State.Changes {
+		if c.Code == 'D' {
+			continue
+		}
+		p := filepath.Join(m.repo.Root, filepath.FromSlash(rel))
+		seen := time.Now()
+		f := m.repo.File(p)
+		at := f.ModTime()
+		if f.Missing || at.IsZero() {
+			continue
+		}
+		prev, known := m.mtimes[p]
+		m.mtimes[p] = at
+		if first || (known && !at.After(prev)) || seen.Sub(at) > recentFor {
+			continue
+		}
+		// A command that changes more files ends at the newest change.
+		if i := m.shellAgent(p, at); i >= 0 {
+			key := m.snap.Agents[i].Key
+			if old, ok := m.shell[key]; !ok || at.After(old.at) {
+				m.shell[key] = shellEdit{file: p, at: at, seen: seen}
+				m.want = &jumpTo{key: key, why: "edits " + m.rel(p)}
+			}
+		}
+	}
+}
+
+// shellAgent returns the agent whose command changed a file at the time at:
+// of the commands that ran at that time, the one that started last. It
+// returns -1 when an edit tool call explains the change.
+func (m *Model) shellAgent(p string, at time.Time) int {
+	best, bestStart := -1, time.Time{}
+	for i := range m.snap.Agents {
+		a := &m.snap.Agents[i]
+		if a.Cwd != "" && !m.repo.Inside(a.Cwd) && !strings.HasPrefix(p, a.Cwd+string(filepath.Separator)) {
+			continue
+		}
+		for j := len(a.Events) - 1; j >= 0; j-- {
+			e := &a.Events[j]
+			if e.Time.Before(at.Add(-2 * time.Minute)) {
+				break
+			}
+			if e.Kind == watch.KindEdit && e.File == p {
+				return -1
+			}
+			if e.Kind != watch.KindRun || e.Time.After(at.Add(time.Second)) {
+				continue
+			}
+			end, ok := m.runEnd[a.Key+"\x00"+e.CallID]
+			switch {
+			case e.Result == watch.Pending:
+				end = time.Now()
+			case ok:
+			case j+1 < len(a.Events):
+				end = a.Events[j+1].Time
+			default:
+				end = e.Time.Add(10 * time.Second)
+			}
+			if at.After(end.Add(2*time.Second)) || !e.Time.After(bestStart) {
+				continue
+			}
+			best, bestStart = i, e.Time
+		}
+	}
+	return best
+}
+
+// shellPos is the position of an agent in a file that its command changed,
+// when the change is newer than the last read or edit of the agent.
+func (m *Model) shellPos(i int) (pos, bool) {
+	a := &m.snap.Agents[i]
+	se, ok := m.shell[a.Key]
+	if !ok {
+		return pos{}, false
+	}
+	for j := len(a.Events) - 1; j >= 0; j-- {
+		if e := &a.Events[j]; hasPosition(e) {
+			if e.Time.After(se.at) {
+				return pos{}, false
+			}
+			break
+		}
+	}
+	f := m.repo.File(se.file)
+	if f.Missing || len(f.Lines) == 0 {
+		return pos{}, false
+	}
+	line := 0
+	switch {
+	case !f.LastAt.Before(se.seen):
+		line = f.LastTo
+	case len(f.Hunks) > 0:
+		line = f.Hunks[0]
+	}
+	line = min(line, len(f.Lines)-1)
+	t := f.Lines[line].Text
+	return pos{ok: true, file: se.file, line: line, col: displayCol(t, utf8.RuneCountInString(t)), readFrom: -1, editing: m.acts[i].Act == "running"}, true
 }
 
 func (m *Model) jump(i int, why string) {
@@ -551,6 +725,9 @@ func eventID(a *watch.Agent, i int) string {
 // position finds the file line of an agent: the line it reads or the end
 // of the text it edited.
 func (m *Model) position(i int) pos {
+	if p, ok := m.shellPos(i); ok {
+		return p
+	}
 	a, act := &m.snap.Agents[i], m.acts[i]
 	cur := act.Cur
 	// A file that is gone, such as a scratch file, shows nothing, and an

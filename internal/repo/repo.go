@@ -199,6 +199,11 @@ type File struct {
 	TooBig  bool
 	Version int // grows on each change of content
 
+	// LastFrom and LastTo are the lines of the last change on disk that
+	// shoulder saw, at LastAt.
+	LastFrom, LastTo int
+	LastAt           time.Time
+
 	stamp   time.Time
 	mtime   time.Time
 	size    int64
@@ -245,7 +250,11 @@ func (r *Repo) File(path string) *File {
 			f.raw = nil
 			break
 		}
+		old := f.raw
 		f.raw = splitLines(b)
+		if from, to, ok := changedRange(old, f.raw); ok && old != nil {
+			f.LastFrom, f.LastTo, f.LastAt = from, to, time.Now()
+		}
 	}
 	if err == nil {
 		f.mtime, f.size = st.ModTime(), st.Size()
@@ -257,6 +266,31 @@ func (r *Repo) File(path string) *File {
 	f.diff()
 	f.Version++
 	return f
+}
+
+// ModTime is the modification time of the file at the last load.
+func (f *File) ModTime() time.Time { return f.mtime }
+
+// changedRange returns the first and the last line of b that differ from a.
+// It reports false when a and b are the same.
+func changedRange(a, b []string) (int, int, bool) {
+	n := min(len(a), len(b))
+	i := 0
+	for i < n && a[i] == b[i] {
+		i++
+	}
+	if i == len(a) && i == len(b) {
+		return 0, 0, false
+	}
+	j := 0
+	for j < n-i && a[len(a)-1-j] == b[len(b)-1-j] {
+		j++
+	}
+	if len(b) == 0 {
+		return 0, 0, true
+	}
+	from := min(i, len(b)-1)
+	return from, max(from, len(b)-1-j), true
 }
 
 // baseline returns the old content of a file: the version in HEAD, or the

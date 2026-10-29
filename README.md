@@ -91,11 +91,22 @@ The bar under each agent shows how full its context window is.
 Auto focus is on when shoulder starts. The view jumps to the work of the agents:
 
 - When an agent edits a file in the project, the focus goes to that agent and its file.
+- When an agent edits a file through the shell, such as with `sed -i`, a script or `gofmt -w`, the focus goes to that agent and the changed lines. See [Commands](#commands).
+- When an agent asks you a question or waits for your approval, the focus goes to that agent.
 - When the focused agent finishes, the focus goes to an agent that still works in the project.
 
 shoulder waits at least 1.5 seconds between two jumps, so agents that work at the same time do not make the view flicker. In free scroll, the view does not jump.
 
 To keep the focus on one agent, select it with `1` … `9`, `tab` or a click. This pins the agent and turns auto focus off. To turn auto focus on again, press `a`. The status line shows `auto` or `pinned`.
+
+## Commands
+
+shoulder follows the commands that agents run in the shell:
+
+- `cat`, `head`, `sed -n` and `nl | sed -n` count as reads of a file. The view goes to the lines that the agent reads.
+- `rg`, `grep` and `git grep` count as searches.
+- A command with more parts, such as `cat a.go && sed -n 1,80p b.go`, gives a read for each file. A `cd DIR` part changes the directory of the paths after it.
+- When a file in `git status` changes on disk and no edit tool call explains the change, the edit goes to the agent that ran a command at that time.
 
 ## All projects
 
@@ -194,6 +205,7 @@ In a git repository, shoulder compares each file with `HEAD`. Outside git, it co
 - shoulder reads opencode 2.x. It does not read the older `part` tables of opencode 1.x.
 - For Claude Code, Codex, opencode and omp, the approval state is an estimate. See [Agent states](#agent-states).
 - When omp moves a command to the background, shoulder shows it as running until omp writes the output of the finished job.
+- shoulder finds edits through the shell only for files in the `git status` of this project. When you edit a file in your editor while an agent runs a command, the edit also goes to that agent.
 - In all projects, `FILES` shows the git changes of this project only. For the other projects, it shows the files that agents edited.
 - The binaries are for Linux and macOS. shoulder is not tested on Windows.
 

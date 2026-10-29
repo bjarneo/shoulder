@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -168,7 +169,7 @@ func toolEvents(name string, in args, cwd string, st toolStyle) []Event {
 		if wd != "" {
 			cwd = absPath(wd, cwd)
 		}
-		return []Event{shellEvent(e, cmd, cwd)}
+		return shellEvents(e, cmd, cwd)
 	case "grep", "search_file_content", "grep_search", "grep_files", "rg", "search":
 		e.Kind = KindGrep
 		e.Query = in.str("pattern", "query", "regex")
@@ -331,47 +332,123 @@ func parsePatch(text string) []patchFile {
 	return files
 }
 
-// shellEvent classifies a shell command. Simple file reads become read
-// events and searches become grep events, so that the file view can follow
-// agents that read through the shell.
-func shellEvent(e Event, cmd, cwd string) Event {
+// shellEvents classifies a shell command. A file read becomes a read event
+// and a search becomes a grep event, so that the file view can follow agents
+// that read through the shell. A command with more parts, such as
+// "cat a.go && sed -n 1,80p b.go", gives an event for each read and search,
+// and a run event for the other parts. The run event comes last, so that
+// the agent shows as running while the command runs. It keeps the command
+// and its output. Without a run event, the first event keeps them.
+func shellEvents(e Event, cmd, cwd string) []Event {
 	e.Cmd = strings.TrimSpace(cmd)
 	e.Kind = KindRun
-	script := stripCd(e.Cmd)
-	if strings.ContainsAny(script, ";&><`$\n") {
-		return e
+	parts := splitScript(e.Cmd)
+	if parts == nil || strings.Contains(e.Cmd, "<<") {
+		return []Event{e}
 	}
-	pipes := strings.Split(script, "|")
-	if len(pipes) > 2 {
-		return e
+	var out []Event
+	other := false
+	for _, p := range parts {
+		words := shellWords(p.segs[0])
+		switch {
+		case len(words) == 0:
+			continue
+		case words[0] == "cd" && len(p.segs) == 1:
+			if len(words) == 2 && !strings.ContainsAny(p.bare, "$`") {
+				dir := words[1]
+				if dir == "~" {
+					dir = home()
+				}
+				cwd = absPath(dir, cwd)
+			} else {
+				other = true
+			}
+			continue
+		case quietCmds[words[0]] && len(p.segs) == 1:
+			continue
+		}
+		if x, ok := shellPart(e, p, cwd); ok {
+			out = append(out, x)
+		} else {
+			other = true
+		}
 	}
-	words := shellWords(pipes[0])
+	if len(out) == 0 {
+		return []Event{e}
+	}
+	for i := range out {
+		if other || i > 0 {
+			out[i].Cmd = ""
+		}
+	}
+	if other {
+		out = append(out, e)
+	}
+	return out
+}
+
+// quietCmds are commands that only print text, such as a separator between
+// two reads.
+var quietCmds = map[string]bool{"echo": true, "printf": true, "pwd": true, "true": true, ":": true}
+
+// filterCmds can follow a read or a search in a pipe.
+var filterCmds = map[string]bool{"head": true, "tail": true, "sort": true, "uniq": true, "wc": true, "cut": true}
+
+// safeRedirects only hide output, so a read with one of them is still a read.
+var safeRedirects = []string{"2>/dev/null", "2>&1", "&>/dev/null", "1>/dev/null", ">/dev/null"}
+
+// shellPart classifies one part of a command. It reports false for a part
+// that is not a read or a search.
+func shellPart(e Event, p scriptPart, cwd string) (Event, bool) {
+	bare := p.bare
+	for _, r := range safeRedirects {
+		bare = strings.ReplaceAll(bare, r, "")
+	}
+	if strings.ContainsAny(bare, "<>&$`") || len(p.segs) > 3 {
+		return e, false
+	}
+	seg := func(i int) []string {
+		var words []string
+		for _, w := range shellWords(p.segs[i]) {
+			if !slices.Contains(safeRedirects, w) {
+				words = append(words, w)
+			}
+		}
+		return words
+	}
+	words := seg(0)
 	if len(words) == 0 {
-		return e
+		return e, false
 	}
 	tool := filepath.Base(words[0])
-	if len(pipes) == 2 {
+	rest := 1
+	if len(p.segs) > 1 && (tool == "nl" || tool == "cat") {
 		// "nl -ba f | sed -n '1,80p'" and "cat -n f | sed -n '1,80p'"
-		if tool != "nl" && tool != "cat" {
-			return e
+		if from, to, ok := sedRange(seg(1)); ok {
+			if file := lastNonFlag(words[1:]); file != "" {
+				e = readEvent(e, absPath(file, cwd), from, to)
+				rest = 2
+			}
 		}
-		file := lastNonFlag(words[1:])
-		from, to, ok := sedRange(shellWords(pipes[1]))
-		if file == "" || !ok {
-			return e
+	}
+	for i := rest; i < len(p.segs); i++ {
+		if w := seg(i); len(w) == 0 || !filterCmds[filepath.Base(w[0])] {
+			return e, false
 		}
-		return readEvent(e, absPath(file, cwd), from, to)
+	}
+	if rest == 2 {
+		return e, true
 	}
 	switch tool {
 	case "cat", "bat", "less":
 		files := nonFlags(words[1:])
 		if len(files) == 1 {
-			return readEvent(e, absPath(files[0], cwd), 0, -1)
+			return readEvent(e, absPath(files[0], cwd), 0, -1), true
 		}
 	case "sed":
 		if from, to, ok := sedRange(words); ok {
 			if file := lastNonFlag(words[1:]); file != "" && !sedExpr.MatchString(file) {
-				return readEvent(e, absPath(file, cwd), from, to)
+				return readEvent(e, absPath(file, cwd), from, to), true
 			}
 		}
 	case "head":
@@ -393,22 +470,90 @@ func shellEvent(e Event, cmd, cwd string) Event {
 			}
 		}
 		if file != "" && n > 0 {
-			return readEvent(e, absPath(file, cwd), 0, n-1)
+			return readEvent(e, absPath(file, cwd), 0, n-1), true
 		}
 	case "rg", "grep", "ag", "ack":
-		pat, where := grepArgs(words[1:])
-		if pat != "" {
+		if pat, where := grepArgs(words[1:]); pat != "" {
 			e.Kind, e.Query, e.Text = KindGrep, pat, where
+			return e, true
 		}
 	case "git":
 		if len(words) > 2 && words[1] == "grep" {
-			pat, where := grepArgs(words[2:])
-			if pat != "" {
+			if pat, where := grepArgs(words[2:]); pat != "" {
 				e.Kind, e.Query, e.Text = KindGrep, pat, where
+				return e, true
 			}
 		}
 	}
-	return e
+	return e, false
+}
+
+// scriptPart is one command of a script: the commands of its pipe, and its
+// text outside quotes, where the shell expands and redirects.
+type scriptPart struct {
+	segs []string
+	bare string
+}
+
+// splitScript splits a script at the separators &&, ||, ; and newline, and
+// each part at its pipes. It skips separators in quotes. It returns nil
+// when a quote does not close.
+func splitScript(s string) []scriptPart {
+	var out []scriptPart
+	var cur scriptPart
+	var seg, bare strings.Builder
+	endSeg := func() {
+		cur.segs = append(cur.segs, strings.TrimSpace(seg.String()))
+		seg.Reset()
+	}
+	endPart := func() {
+		endSeg()
+		cur.bare = bare.String()
+		if strings.TrimSpace(strings.Join(cur.segs, "")) != "" {
+			out = append(out, cur)
+		}
+		cur = scriptPart{}
+		bare.Reset()
+	}
+	var q byte
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case q != 0:
+			seg.WriteByte(c)
+			switch {
+			case c == '\\' && q == '"' && i+1 < len(s):
+				i++
+				seg.WriteByte(s[i])
+			case c == q:
+				q = 0
+			case q == '"' && (c == '$' || c == '`'):
+				bare.WriteByte(c)
+			}
+		case c == '\'' || c == '"':
+			q = c
+			seg.WriteByte(c)
+		case c == '\\' && i+1 < len(s):
+			seg.WriteByte(c)
+			i++
+			seg.WriteByte(s[i])
+		case c == ';' || c == '\n':
+			endPart()
+		case (c == '&' || c == '|') && i+1 < len(s) && s[i+1] == c:
+			endPart()
+			i++
+		case c == '|':
+			endSeg()
+		default:
+			seg.WriteByte(c)
+			bare.WriteByte(c)
+		}
+	}
+	if q != 0 {
+		return nil
+	}
+	endPart()
+	return out
 }
 
 func readEvent(e Event, file string, from, to int) Event {
@@ -481,16 +626,6 @@ func lastNonFlag(words []string) string {
 		return ""
 	}
 	return nf[len(nf)-1]
-}
-
-// stripCd removes a leading "cd DIR &&" from a command.
-func stripCd(s string) string {
-	if strings.HasPrefix(s, "cd ") {
-		if i := strings.Index(s, "&&"); i > 0 {
-			return strings.TrimSpace(s[i+2:])
-		}
-	}
-	return s
 }
 
 // shellWords splits a command into words. It handles single quotes, double

@@ -27,9 +27,18 @@ func TestShellEvent(t *testing.T) {
 		{"cat a.go | grep x", KindRun, "", -1, -1, ""},
 		{"go test ./... > out.txt", KindRun, "", -1, -1, ""},
 		{"cargo build", KindRun, "", -1, -1, ""},
+		{"sed -n 1,20p a.go 2>/dev/null | head -5", KindRead, "/w/a.go", 0, 19, ""},
+		{`grep -n -E 'a|b;c' x.go`, KindGrep, "", -1, -1, "a|b;c"},
+		{"cat $HOME/a.go", KindRun, "", -1, -1, ""},
+		{"echo hi && go vet ./...", KindRun, "", -1, -1, ""},
 	}
 	for _, c := range cases {
-		e := shellEvent(Event{Line: -1, EndLine: -1}, c.cmd, "/w")
+		evs := shellEvents(Event{Line: -1, EndLine: -1}, c.cmd, "/w")
+		if len(evs) != 1 {
+			t.Errorf("%q: got %d events", c.cmd, len(evs))
+			continue
+		}
+		e := evs[0]
 		if e.Kind != c.kind || e.File != c.file || e.Query != c.query {
 			t.Errorf("%q: got kind %s file %q query %q", c.cmd, e.Kind, e.File, e.Query)
 			continue
@@ -39,6 +48,48 @@ func TestShellEvent(t *testing.T) {
 		}
 		if e.Cmd == "" {
 			t.Errorf("%q: command text is lost", c.cmd)
+		}
+	}
+}
+
+func TestShellEventsWithParts(t *testing.T) {
+	type want struct {
+		kind Kind
+		file string
+		cmd  bool
+	}
+	cases := []struct {
+		cmd  string
+		want []want
+	}{
+		{"cat flake.nix && cat go.mod && which nix; sed -n 395,425p internal/ui/view.go", []want{
+			{KindRead, "/w/flake.nix", false}, {KindRead, "/w/go.mod", false}, {KindRead, "/w/internal/ui/view.go", false}, {KindRun, "", true},
+		}},
+		{"sed -n 40,156p repo.go && echo ---- && sed -n 1,20p diff.go", []want{
+			{KindRead, "/w/repo.go", true}, {KindRead, "/w/diff.go", false},
+		}},
+		{"cd /x && sed -n 1,5p a.go && cd sub && cat b.go", []want{
+			{KindRead, "/x/a.go", true}, {KindRead, "/x/sub/b.go", false},
+		}},
+		{"go build ./... && grep -rn TODO internal | head", []want{
+			{KindGrep, "", false}, {KindRun, "", true},
+		}},
+		{"cat > a.go <<'EOF'\npackage a\nEOF", []want{{KindRun, "", true}}},
+		{"echo 'a && b'", []want{{KindRun, "", true}}},
+		{`sed -n "1,5p" 'a b.go'`, []want{{KindRead, "/w/a b.go", true}}},
+		{"cat 'unclosed", []want{{KindRun, "", true}}},
+	}
+	for _, c := range cases {
+		evs := shellEvents(Event{Line: -1, EndLine: -1}, c.cmd, "/w")
+		if len(evs) != len(c.want) {
+			t.Errorf("%q: got %d events, want %d", c.cmd, len(evs), len(c.want))
+			continue
+		}
+		for i, w := range c.want {
+			e := evs[i]
+			if e.Kind != w.kind || e.File != w.file || (e.Cmd != "") != w.cmd {
+				t.Errorf("%q event %d: got kind %s file %q cmd %q", c.cmd, i, e.Kind, e.File, e.Cmd)
+			}
 		}
 	}
 }
@@ -390,4 +441,16 @@ func TestWatchAllProjects(t *testing.T) {
 	wait(2)
 	w.SetAll(false)
 	wait(1)
+}
+
+func TestLongCommandWithReadsIsRunning(t *testing.T) {
+	start := time.Now().Add(-time.Minute)
+	evs := shellEvents(Event{Tool: "Bash", CallID: "c1", Line: -1, EndLine: -1}, "go build ./... && sed -n 1,20p a.go", "/w")
+	for i := range evs {
+		evs[i].Time = start
+	}
+	a := Agent{Events: evs, Updated: start}
+	if act := a.Activity(time.Now()); act.Status != Active || act.Act != "running" {
+		t.Fatalf("got %+v", act)
+	}
 }

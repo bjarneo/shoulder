@@ -169,8 +169,7 @@ func (h *codexHandle) item(s *session, t time.Time, p *codexPayload) {
 		if p.Action.WorkingDirectory != "" {
 			cwd = p.Action.WorkingDirectory
 		}
-		e := shellEvent(Event{Tool: "local_shell", Line: -1, EndLine: -1, Hits: -1}, argvScript(p.Action.Command), cwd)
-		h.call(s, t, p.CallID, []Event{e})
+		h.call(s, t, p.CallID, shellEvents(Event{Tool: "local_shell", Line: -1, EndLine: -1, Hits: -1}, argvScript(p.Action.Command), cwd))
 	case "web_search_call":
 		q := ""
 		if p.Action != nil {
@@ -216,7 +215,13 @@ func (h *codexHandle) output(s *session, t time.Time, id, out string) {
 		// Output of write_stdin for a command that runs in the background.
 		delete(h.polls, id)
 		if ix := s.call(h.procs[sid]); len(ix) > 0 {
+			// One event of a command keeps its text and its output.
 			e := &s.Events[ix[0]]
+			for _, i := range ix {
+				if s.Events[i].Cmd != "" {
+					e = &s.Events[i]
+				}
+			}
 			e.Output = append(e.Output, outputLines(afterOutput(out))...)
 			if exitRe.MatchString(out) {
 				runResult(e, strings.Join(e.Output, "\n")+"\n"+out, -1, false)
