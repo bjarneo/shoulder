@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParse(t *testing.T) {
@@ -30,9 +31,33 @@ quit = []
 	}
 }
 
+func TestParseSettings(t *testing.T) {
+	c, err := Parse([]byte(`since = "6h"   # a long day
+all = true
+signs = false
+hide_done = true
+editor = "code -w"
+
+[keys]
+quit = "x"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Since == nil || *c.Since != 6*time.Hour || c.All == nil || !*c.All || c.Signs == nil || *c.Signs ||
+		c.Splits != nil || c.HideDone == nil || !*c.HideDone || c.Editor != "code -w" || len(c.Keys) != 1 {
+		t.Fatalf("got %+v", c)
+	}
+}
+
 func TestParseErrors(t *testing.T) {
 	cases := map[string]string{
-		"hunk_next = \"n\"":              "line 1: unknown setting",
+		"hunk_next = \"n\"":              "line 1: unknown setting \"hunk_next\". The settings are since",
+		"all = yes":                      "line 1: all: write true or false",
+		"since = \"soon\"":               "line 1: since: write a duration",
+		"since = 30":                     "line 1: since: put the value in quotes",
+		"editor =":                       "line 1: editor: the value is missing",
+		"signs =":                        "line 1: signs: write true or false",
 		"[colors]":                       "line 1: unknown table [colors]",
 		"[keys]\nhunk_next = n":          "line 2: hunk_next: put the value in quotes",
 		"[keys]\nhunk_next = \"n":        "line 2: hunk_next: the string has no closing quote",

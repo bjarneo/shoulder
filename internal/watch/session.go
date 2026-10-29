@@ -123,13 +123,14 @@ func (s *session) endTurn(t time.Time, text string) {
 // tail reads complete lines that are appended to a file.
 type tail struct {
 	path    string
+	start   int64 // bytes to read at the first call, 0 for tailInitial
 	off     int64
 	partial []byte
 	started bool
 }
 
 // lines calls fn for each new complete line. At the first call it skips all
-// but the last tailInitial bytes of the file.
+// but the last t.start bytes of the file.
 func (t *tail) lines(fn func([]byte)) error {
 	f, err := os.Open(t.path)
 	if err != nil {
@@ -148,8 +149,12 @@ func (t *tail) lines(fn func([]byte)) error {
 	skipFirst := false
 	if !t.started {
 		t.started = true
-		if size > tailInitial {
-			t.off = size - tailInitial
+		start := t.start
+		if start <= 0 {
+			start = tailInitial
+		}
+		if size > start {
+			t.off = size - start
 			skipFirst = true
 		}
 	}

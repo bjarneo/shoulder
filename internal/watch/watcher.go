@@ -13,6 +13,7 @@ type Options struct {
 	Root  string        // project directory; sessions in it or below it match
 	All   bool          // watch the sessions of all projects
 	Since time.Duration // ignore sessions without activity in this period
+	Tail  int64         // bytes of each log to read at the start, 0 for 8 MiB
 }
 
 // Snapshot is an immutable copy of all watched agents.
@@ -56,6 +57,14 @@ func (w *Watcher) init() {
 	w.sessions = map[string]*session{}
 	w.notes = map[string]string{}
 	w.sources = []source{newClaude(), newCodex(), newGemini(), newOpencode(), newOmp()}
+}
+
+// Once reads the sessions one time and returns the snapshot, for a caller
+// that does not run the watcher.
+func (w *Watcher) Once() Snapshot {
+	defer w.closeSources()
+	w.step(true)
+	return w.snapshot()
 }
 
 // Reload drops all state and reads the sessions again.

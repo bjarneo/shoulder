@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Hide the agents that are done. Press `x`, or start with `--hide-done`.
+- Open the file at the cursor in your editor with `e`, and copy `path:line` with `y`.
+- Step through the activity log of an agent with `,` and `.`, or click an entry. The view shows the file and the terminal at that step.
+- When you come back to the terminal, the message line lists what the agents did while you were away.
+- Set the defaults of the flags and the editor in `~/.config/shoulder/config.toml`.
+- `shoulder status` prints one line for Waybar or tmux. `--json` gives the format of a Waybar custom module.
+- The terminal pane shows the first 5 lines of a command with more lines, such as a script in a heredoc.
+
 ## v0.2.0 · 2026-10-29
 
 shoulder now follows agents through the shell, watches all projects, and lets you change the keys.

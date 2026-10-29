@@ -28,6 +28,7 @@ func (m *Model) View() tea.View {
 	v := tea.NewView("")
 	v.AltScreen = true
 	v.MouseMode = tea.MouseModeCellMotion
+	v.ReportFocus = true
 	v.WindowTitle = "shoulder · " + m.repo.Name
 	if m.w == 0 || m.h == 0 {
 		return v
@@ -375,6 +376,16 @@ func (m *Model) drawEmpty(c *Canvas, x, y, w, h, ai int, split bool) {
 			{start, Style{FG: t.Dim()}},
 			{"sessions from the last " + durText(m.opt.Since) + " show here", Style{FG: t.Faint()}},
 		}
+		if n := m.hidden(); n > 0 {
+			show := ""
+			if k := m.keys.first(actHideDone); k != "" {
+				show = " · " + k + " shows them"
+			}
+			lines = []ln{
+				{"all agents are done", Style{FG: t.FG(), Bold: true}},
+				{plural(n, "agent") + " hidden" + show, Style{FG: t.Dim()}},
+			}
+		}
 	} else {
 		a := &m.snap.Agents[ai]
 		if !split {
@@ -408,6 +419,8 @@ func (m *Model) drawSidebar(c *Canvas, x, y, w, h int) {
 			done++
 		}
 	}
+	// The count of done agents includes the hidden ones.
+	done += m.hidden()
 	m.header(c, x, y, w, "AGENTS", "●"+strconv.Itoa(act)+" ○"+strconv.Itoa(wait)+" ✓"+strconv.Itoa(done))
 	keysH := len(m.side) + 2
 	need := n*3 - 1
@@ -600,8 +613,24 @@ func (m *Model) drawTerminal(c *Canvas, x, y, w, h, ai int) {
 	}
 	c.text(cx, y, x+w, "~/"+where, Style{FG: t.Dim()})
 	var lines []termLine
+	rows := h - 1
 	if ai >= 0 {
-		lines = m.termLines(ai)
+		// In history mode, the terminal shows the time of the selected
+		// event: the commands up to it, from the selected command when its
+		// output is long.
+		a := &m.snap.Agents[ai]
+		upto, sel := len(a.Events), m.histAt(ai)
+		if sel >= 0 {
+			upto = sel + 1
+			for upto < len(a.Events) && a.Events[upto].Cmd == "" {
+				upto++
+			}
+		}
+		var start int
+		lines, start = m.termLines(ai, upto, sel)
+		if start >= 0 && len(lines)-start > rows {
+			lines = lines[start : start+rows]
+		}
 	}
 	if len(lines) == 0 {
 		msg := "no agent selected"
@@ -610,7 +639,6 @@ func (m *Model) drawTerminal(c *Canvas, x, y, w, h, ai int) {
 		}
 		lines = []termLine{{text: msg, c: t.Faint()}}
 	}
-	rows := h - 1
 	if len(lines) > rows {
 		lines = lines[len(lines)-rows:]
 	}
@@ -622,28 +650,46 @@ func (m *Model) drawTerminal(c *Canvas, x, y, w, h, ai int) {
 	}
 }
 
-func (m *Model) termLines(ai int) []termLine {
+// termLines returns the terminal lines of the commands in the first upto
+// events of an agent, and the index of the line of the command of event
+// sel, or -1. A command with more lines shows its first lines.
+func (m *Model) termLines(ai, upto, sel int) ([]termLine, int) {
 	t := &m.theme
 	a := &m.snap.Agents[ai]
 	var out []termLine
+	start := -1
 	prompt := m.project(ai) + " $ "
-	for j := range a.Events {
+	for j := range min(upto, len(a.Events)) {
 		e := &a.Events[j]
 		if e.Cmd == "" {
 			continue
 		}
-		out = append(out, termLine{pre: prompt, text: firstLine(e.Cmd), c: t.FG()})
+		if j == sel {
+			start = len(out)
+		}
+		cmd := strings.Split(e.Cmd, "\n")
+		out = append(out, termLine{pre: prompt, text: cmd[0], c: t.FG()})
+		for _, l := range cmd[1:min(len(cmd), 1+cmdPreview)] {
+			out = append(out, termLine{pre: "> ", text: expandTabs(l, 0), c: t.Dim()})
+		}
+		if more := len(cmd) - 1 - cmdPreview; more > 0 {
+			out = append(out, termLine{pre: "> ", text: "… " + plural(more, "more line"), c: t.Faint()})
+		}
 		for _, l := range e.Output {
 			out = append(out, termLine{text: expandTabs(l, 0), c: m.cls(l)})
 		}
 		if len(out) > 200 {
-			out = out[len(out)-200:]
+			drop := len(out) - 200
+			out = out[drop:]
+			if start >= 0 {
+				start = max(0, start-drop)
+			}
 		}
 	}
-	if n := len(a.Events); n > 0 && m.acts[ai].Act == "running" {
+	if upto >= len(a.Events) && len(a.Events) > 0 && m.acts[ai].Act == "running" {
 		out = append(out, termLine{text: "█", c: t.Agent(ai)})
 	}
-	return out
+	return out, start
 }
 
 // cls colors a line of command output.
@@ -773,8 +819,7 @@ func (m *Model) drawActivity(c *Canvas, x, y, w, h, ai int) {
 	}
 	top := y + 1 + len(task) + 1
 	tw := w - 2 - 8 - 1 - 4 - 1
-	yy := y + h
-	for j := len(a.Events) - 1; j >= 0 && yy > top; j-- {
+	entry := func(j int) (logEntry, []string) {
 		le := m.logEntry(ai, &a.Events[j])
 		lines := wrap(le.text, tw)
 		if len(lines) == 0 {
@@ -784,10 +829,44 @@ func (m *Model) drawActivity(c *Canvas, x, y, w, h, ai int) {
 			lines = lines[:4]
 			lines[3] = clip(lines[3]+" …", tw)
 		}
+		return le, lines
+	}
+	// In history mode, the log ends some entries after the selected one,
+	// so that the selected entry shows.
+	last := len(a.Events) - 1
+	sel := m.histAt(ai)
+	if sel >= 0 {
+		_, l := entry(sel)
+		used := len(l)
+		for last = sel; last+1 < len(a.Events); last++ {
+			_, l := entry(last + 1)
+			if used+len(l) > (y+h-top)/2 {
+				break
+			}
+			used += len(l)
+		}
+	}
+	away := !m.away.IsZero()
+	newerAway := false
+	yy := y + h
+	for j := last; j >= 0 && yy > top; j-- {
+		e := &a.Events[j]
+		if away && newerAway && !e.Time.After(m.away) {
+			// The entries below came while you were away.
+			yy--
+			c.text(x+1, yy, x+w-1, clip("── while you were away ─────────────────────────", w-2), Style{FG: t.Faint()})
+			away = false
+		}
+		newerAway = e.Time.After(m.away)
+		le, lines := entry(j)
 		start := yy - len(lines)
 		if start < top && yy < y+h {
 			// Show only whole entries, except for the newest one.
 			break
+		}
+		if j == sel {
+			c.fill(x, max(top, start), w, yy-max(top, start), t.Raised())
+			c.text(x, max(top, start), x+1, "▎", Style{FG: t.Agent(ai)})
 		}
 		for k := len(lines) - 1; k >= 0; k-- {
 			ry := start + k
@@ -798,8 +877,9 @@ func (m *Model) drawActivity(c *Canvas, x, y, w, h, ai int) {
 				c.text(x+1, ry, x+9, le.time, Style{FG: t.Faint()})
 				c.text(x+10, ry, x+14, le.kind, Style{FG: le.kc})
 			}
-			c.text(x+15, ry, x+w-1, lines[k], Style{FG: le.tc})
+			c.text(x+15, ry, x+w-1, lines[k], Style{FG: le.tc, Bold: j == sel})
 		}
+		m.addZone(x, max(top, start), w, yy-max(top, start), func() tea.Cmd { m.selectEvent(ai, j); return nil })
 		yy = start
 	}
 }
@@ -1017,11 +1097,14 @@ func (m *Model) drawStatus(c *Canvas, y int, fp paneInfo) {
 	fol := m.following()
 	modeC := defColor
 	mode := "NORMAL"
-	if fol {
+	switch {
+	case fol:
 		mode = "FOLLOW"
 		if fi >= 0 {
 			modeC = t.Agent(fi)
 		}
+	case m.histAt(fi) >= 0:
+		mode, modeC = "HISTORY", t.Agent(fi)
 	}
 	// Right side, from the right edge.
 	pct := "All"
@@ -1144,7 +1227,13 @@ func (m *Model) drawHelp(c *Canvas) {
 		kw, tw = max(kw, width(k[0])+2), max(tw, width(k[1]))
 	}
 	w := min(max(58, 3+kw+tw+3), m.w-4)
-	h := len(m.helpTab) + 6
+	// A short terminal shows the first rows and a line that tells how many
+	// rows do not fit.
+	tab := m.helpTab
+	if room := m.h - 6; len(tab) > room {
+		tab = append(append([][2]string(nil), tab[:max(0, room-1)]...), [2]string{"…", plural(len(m.helpTab)-room+1, "more key") + " in a taller terminal"})
+	}
+	h := len(tab) + 6
 	x := (m.w - w) / 2
 	y := max(0, (m.h-h)/2)
 	bg := t.Sunk()
@@ -1160,7 +1249,7 @@ func (m *Model) drawHelp(c *Canvas) {
 		c.text(x+w-1, yy, x+w, "│", bc)
 	}
 	c.text(x+3, y+1, x+w-2, "Keys · watch only", Style{FG: t.FG(), Bold: true})
-	for i, k := range m.helpTab {
+	for i, k := range tab {
 		c.text(x+3, y+3+i, x+3+kw, clip(k[0], kw-1), Style{FG: t.Key()})
 		c.text(x+3+kw, y+3+i, x+w-2, clip(k[1], w-5-kw), Style{FG: t.Dim()})
 	}

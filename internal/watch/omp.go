@@ -57,7 +57,7 @@ func (o *omp) scan(w *Watcher, cutoff time.Time) {
 			o.skip[f] = true
 			continue
 		}
-		h := &ompHandle{t: tail{path: f}, jobs: map[string]string{}}
+		h := &ompHandle{t: tail{path: f, start: w.opt.Tail}, jobs: map[string]string{}}
 		s := newSession(key, "omp", h)
 		s.Cwd = cwd
 		if parent != "" {

@@ -18,11 +18,13 @@ import (
 
 // Options are the start settings of the UI.
 type Options struct {
-	Splits bool // start with one split per agent
-	Signs  bool // show changes as signs instead of inline deleted lines
-	All    bool // start with the agents of all projects
-	Since  time.Duration
-	Keys   *Keymap // nil for the default keys
+	Splits   bool // start with one split per agent
+	Signs    bool // show changes as signs instead of inline deleted lines
+	All      bool // start with the agents of all projects
+	HideDone bool // start with the agents that are done hidden
+	Since    time.Duration
+	Keys     *Keymap // nil for the default keys
+	Editor   string  // the command that opens a file, such as "nvim"
 }
 
 // Model is the Bubble Tea model of the TUI.
@@ -37,7 +39,8 @@ type Model struct {
 	w, h    int
 	now     time.Time
 
-	snap   watch.Snapshot
+	full   watch.Snapshot // the last snapshot of the watcher
+	snap   watch.Snapshot // the agents in view
 	acts   []watch.Activity
 	poss   []pos
 	loaded bool
@@ -45,6 +48,10 @@ type Model struct {
 	focusKey string
 	auto     bool // the focus jumps to where agents work
 	all      bool // the agents of all projects show, not only of this project
+	hideDone bool // the agents that are done do not show
+	hist     *histSel
+	awayAt   time.Time // when the terminal lost the focus
+	away     time.Time // the start of the last time away, for the activity log
 	want     *jumpTo
 	lastJump time.Time
 	follow   bool
@@ -151,7 +158,7 @@ func New(r *repo.Repo, w *watch.Watcher, opt Options) *Model {
 	}
 	return &Model{
 		opt: opt, repo: r, watcher: w, keys: keys, side: keys.sidebar(), helpTab: keys.help(),
-		follow: true, auto: true, all: opt.All, splits: opt.Splits, inline: !opt.Signs,
+		follow: true, auto: true, all: opt.All, hideDone: opt.HideDone, splits: opt.Splits, inline: !opt.Signs,
 		ftop: map[string]ftop{}, sweeps: map[string]*sweep{}, lastRead: map[string]string{},
 		edits: map[string][2]int{}, rows: map[string]*rowCache{}, hl: map[string]*highlighted{},
 		seen: map[string]time.Time{}, running: map[string]bool{}, runEnd: map[string]time.Time{},
@@ -224,10 +231,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tickMsg:
 		// A jump that waited for the dwell time, or a focused agent that
 		// finished, moves the focus here.
+		cmd := m.refilter()
 		m.prepare()
 		m.noteWaiting(false)
 		m.autoStep()
-		return m, tick()
+		return m, tea.Batch(cmd, tick())
 	case animMsg:
 		if m.animating() {
 			return m, animate()
@@ -237,6 +245,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// terminal that never replied gets no more queries.
 		if m.theme.hasBG || m.theme.hasFG {
 			return m, tea.Batch(queryTheme(), themeTick())
+		}
+	case tea.BlurMsg:
+		m.awayAt = time.Now()
+	case tea.FocusMsg:
+		m.focusBack()
+	case editorDone:
+		if msg.err != nil {
+			return m, m.flashNote("the editor stopped with an error: "+msg.err.Error(), m.theme.Del())
 		}
 	case tea.BackgroundColorMsg:
 		m.theme.setBG(msg.Color)
@@ -254,6 +270,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // apply takes a new snapshot from the watcher.
 func (m *Model) apply(s watch.Snapshot) tea.Cmd {
+	m.full = s
+	s = m.visible(s)
 	first := !m.loaded
 	m.loaded = true
 	m.now = time.Now()
@@ -698,7 +716,7 @@ func (m *Model) focusIndex() int {
 func (m *Model) focusAgent(i int) {
 	if i >= 0 && i < len(m.snap.Agents) {
 		m.focusKey = m.snap.Agents[i].Key
-		m.follow = true
+		m.follow, m.hist = true, nil
 	}
 }
 
@@ -1075,10 +1093,20 @@ func (m *Model) do(a action) tea.Cmd {
 		if m.following() {
 			m.toNormal()
 		} else {
-			m.follow = true
+			m.follow, m.hist = true, nil
 		}
 	case actBack:
-		m.follow = true
+		m.follow, m.hist = true, nil
+	case actHideDone:
+		return m.toggleHideDone()
+	case actHistPrev:
+		return m.stepHistory(-1)
+	case actHistNext:
+		return m.stepHistory(1)
+	case actEditor:
+		return m.openEditor()
+	case actCopy:
+		return m.copyPath()
 	case actDown:
 		m.moveU(1)
 	case actUp:

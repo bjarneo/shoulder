@@ -45,7 +45,7 @@ func (c *codex) scan(w *Watcher, cutoff time.Time) {
 			if json.Unmarshal(append(append([]byte{'"'}, m[1]...), '"'), &cwd) != nil || !w.inRoot(cwd) {
 				continue
 			}
-			s := newSession(key, "codex", &codexHandle{t: tail{path: f}, procs: map[string]string{}, polls: map[string]string{}})
+			s := newSession(key, "codex", &codexHandle{t: tail{path: f, start: w.opt.Tail}, procs: map[string]string{}, polls: map[string]string{}})
 			s.Cwd = cwd
 			s.CtxMax = 272_000
 			w.add(s)

@@ -51,7 +51,7 @@ func (c *claude) scan(w *Watcher, cutoff time.Time) {
 			if !w.inRoot(cwd) {
 				continue
 			}
-			h := &claudeHandle{t: tail{path: f}}
+			h := &claudeHandle{t: tail{path: f, start: w.opt.Tail}}
 			s := newSession(key, "claude", h)
 			s.Cwd = cwd
 			if strings.Contains(f, string(filepath.Separator)+"subagents"+string(filepath.Separator)) {

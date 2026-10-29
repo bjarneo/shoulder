@@ -20,6 +20,7 @@ const (
 	actAgentPrev
 	actAuto
 	actAllProjects
+	actHideDone
 	actFollow
 	actBack
 	actDown
@@ -32,6 +33,10 @@ const (
 	actHunkPrev
 	actBufferNext
 	actBufferPrev
+	actHistPrev
+	actHistNext
+	actEditor
+	actCopy
 	actSplits
 	actInlineDiff
 	actReload
@@ -51,6 +56,7 @@ var actions = []struct {
 	{actAgentPrev, "agent_prev", []string{"shift+tab"}},
 	{actAuto, "auto", []string{"a"}},
 	{actAllProjects, "all_projects", []string{"A"}},
+	{actHideDone, "hide_done", []string{"x"}},
 	{actFollow, "follow", []string{"f"}},
 	{actBack, "back", []string{"esc"}},
 	{actDown, "down", []string{"j", "down"}},
@@ -63,6 +69,10 @@ var actions = []struct {
 	{actHunkPrev, "hunk_prev", []string{"[ c"}},
 	{actBufferNext, "buffer_next", []string{"L", "g t"}},
 	{actBufferPrev, "buffer_prev", []string{"H", "g T"}},
+	{actHistPrev, "history_prev", []string{","}},
+	{actHistNext, "history_next", []string{"."}},
+	{actEditor, "open_editor", []string{"e"}},
+	{actCopy, "copy_path", []string{"y"}},
 	{actSplits, "splits", []string{"s"}},
 	{actInlineDiff, "inline_diff", []string{"d"}},
 	{actReload, "reload", []string{"R"}},
@@ -281,6 +291,7 @@ var helpRows = []struct {
 	{[]action{actAgentNext, actAgentPrev}, "pin the next / previous agent"},
 	{[]action{actAuto}, "auto focus: jump to new edits ↔ stay"},
 	{[]action{actAllProjects}, "this project ↔ all projects"},
+	{[]action{actHideDone}, "show ↔ hide the agents that are done"},
 	{[]action{actFollow}, "toggle follow / free scroll"},
 	{[]action{actBack}, "back to follow"},
 	{[]action{actDown, actUp}, "move the cursor down / up"},
@@ -288,6 +299,9 @@ var helpRows = []struct {
 	{[]action{actTop, actBottom}, "top / bottom of buffer"},
 	{[]action{actHunkNext, actHunkPrev}, "next / previous hunk"},
 	{[]action{actBufferNext, actBufferPrev}, "next / previous buffer"},
+	{[]action{actHistPrev, actHistNext}, "older / newer step of the agent"},
+	{[]action{actEditor}, "open the file in your editor"},
+	{[]action{actCopy}, "copy path:line"},
 	{[]action{actSplits}, "follow layout ↔ one split per agent"},
 	{[]action{actInlineDiff}, "inline diff ↔ signs"},
 	{[]action{actReload}, "read all sessions again"},

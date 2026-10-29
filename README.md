@@ -59,7 +59,23 @@ shoulder watches the git top level of the directory. It shows the sessions that 
 | `--splits` | off | Start with one split per agent |
 | `--signs` | off | Show changes as signs in the gutter, without the deleted lines |
 | `--all` | off | Watch the agents of all projects, not only of this project |
+| `--hide-done` | off | Hide the agents that are done |
 | `--version` | | Print the version |
+
+### Set the defaults
+
+To change the defaults of the flags, set them at the top of `~/.config/shoulder/config.toml`. A flag on the command line has priority over the file.
+
+```toml
+since = "6h"
+all = true
+hide_done = true
+signs = false
+splits = false
+editor = "nvim"
+```
+
+`editor` is the command that `e` runs. Without it, shoulder uses `VISUAL`, then `EDITOR`, then `vi`. The same file holds the [keys](#change-the-keys).
 
 ## Supported agents
 
@@ -80,11 +96,35 @@ shoulder only reads. It does not send input to an agent, it does not change file
 - The left panel lists the agents and the changed files. A dot next to a file shows which agent is in that file now.
 - The center pane shows the file of the focused agent. A cursor and a label, such as `● A1 editing`, show where the agent works.
 - In the inline diff, deleted lines show in red above the new lines. Added and changed lines have a green background. Press `d` to show the changes as signs in the gutter.
-- The terminal pane under the file shows the commands of the focused agent and their output.
+- The terminal pane under the file shows the commands of the focused agent and their output. A command with more lines, such as a script in a heredoc, shows its first 5 lines.
 - The right panel shows the activity log of the focused agent: reads, searches, edits, commands, replies and prompts.
 - Press `s` for the split layout. Each agent gets a pane with its file and its activity log.
 
 The bar under each agent shows how full its context window is.
+
+To hide the agents that are done, press `x` or start with `--hide-done`. An agent stays for 1 minute after it finishes, and the focused agent always stays. The `✓` count in the sidebar includes the hidden agents.
+
+## Open the file in your editor
+
+To open the file at the cursor in your editor, press `e`. shoulder gives the terminal to the editor and comes back when the editor closes. Most terminal editors get `+LINE FILE`. `zed`, `hx` and `subl` get `FILE:LINE`. VS Code and Cursor get `-g FILE:LINE`.
+
+To copy `path:line` of the cursor, press `y`. The copy uses OSC 52. In tmux, add `set -g set-clipboard on` to your tmux configuration.
+
+## History
+
+To step back through the activity log of the focused agent, press `,`. To step forward, press `.`. You can also click an entry in the activity log.
+
+- The center pane shows the file at the read or the edit of the step.
+- The terminal pane shows the commands up to the step.
+- The status line shows `HISTORY`.
+
+A step past the newest entry, or `esc`, goes back to follow. The center pane shows each file as it is now, not as it was at the step.
+
+### While you were away
+
+When you come back to the terminal after 30 seconds or more, the message line lists what each agent did. An example is `while you were away · A1 claude edited 3 files · A2 codex asks you`. A line in the activity log marks the start of the time away.
+
+This needs a terminal that reports focus changes. In tmux, add `set -g focus-events on` to your tmux configuration.
 
 ## Auto focus
 
@@ -119,6 +159,40 @@ To watch the agents of all projects, press `A` or start shoulder with `--all`. T
 
 Auto focus works the same way. It jumps to new edits in all projects.
 
+## Status bar
+
+`shoulder status` prints one line with the number of agents that work, that wait for you and that are done. With no agents, the line is empty.
+
+```sh
+$ shoulder status
+●2 ○1 ✓3
+```
+
+It takes the flags `--since`, `--all` and `--json`, and a directory. It reads only the end of each session log, so it is fast enough for a status bar.
+
+To show the agents of all projects in Waybar, add a custom module:
+
+```jsonc
+"custom/shoulder": {
+  "exec": "shoulder status --all --json",
+  "return-type": "json",
+  "interval": 5
+}
+```
+
+The JSON has the class `waiting`, `active`, `done` or `none`. The tooltip lists each agent. To color the module when an agent waits for you, add this to the Waybar style:
+
+```css
+#custom-shoulder.waiting { color: #e0af68; }
+```
+
+To show the agents of the current project in tmux, add this to your tmux configuration:
+
+```sh
+set -g status-right '#(shoulder status #{pane_current_path})'
+set -g status-interval 5
+```
+
 ## Agent states
 
 - `●` The agent runs a tool or writes a reply.
@@ -135,6 +209,7 @@ Gemini CLI logs when a tool call waits for approval. For the other agents, shoul
 | `tab`, `shift+tab` | Pin the next or the previous agent |
 | `a` | Turn auto focus on or off |
 | `A` | Switch between the agents of this project and of all projects |
+| `x` | Hide or show the agents that are done |
 | `f` | Toggle follow and free scroll |
 | `esc` | Go back to follow |
 | `j`, `k` | Move the cursor |
@@ -142,6 +217,9 @@ Gemini CLI logs when a tool call waits for approval. For the other agents, shoul
 | `gg`, `G` | Go to the top or the bottom of the file |
 | `]c`, `[c` | Go to the next or the previous change |
 | `H`, `L`, `gT`, `gt` | Open the previous or the next file tab |
+| `,`, `.` | Step to the older or the newer entry of the activity log |
+| `e` | Open the file at the cursor in your editor |
+| `y` | Copy `path:line` of the cursor |
 | `s` | Toggle the follow layout and the split layout |
 | `d` | Toggle the inline diff and the signs |
 | `R` | Read all sessions again |
@@ -175,6 +253,7 @@ shoulder stops with an error for an unknown action, an unknown key, or 2 actions
 | `agent_next`, `agent_prev` | `tab`, `shift+tab` |
 | `auto` | `a` |
 | `all_projects` | `A` |
+| `hide_done` | `x` |
 | `follow` | `f` |
 | `back` | `esc` |
 | `down`, `up` | `j` `down`, `k` `up` |
@@ -182,6 +261,9 @@ shoulder stops with an error for an unknown action, an unknown key, or 2 actions
 | `top`, `bottom` | `gg` `home`, `G` `end` |
 | `hunk_next`, `hunk_prev` | `]c`, `[c` |
 | `buffer_next`, `buffer_prev` | `L` `gt`, `H` `gT` |
+| `history_prev`, `history_next` | `,`, `.` |
+| `open_editor` | `e` |
+| `copy_path` | `y` |
 | `splits` | `s` |
 | `inline_diff` | `d` |
 | `reload` | `R` |

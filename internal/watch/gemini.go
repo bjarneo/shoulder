@@ -56,7 +56,7 @@ func (g *gemini) scan(w *Watcher, cutoff time.Time) {
 			if err != nil || st.ModTime().Before(cutoff) {
 				continue
 			}
-			h := &geminiHandle{path: f, legacy: strings.HasSuffix(f, ".json"), t: tail{path: f}, msgs: map[string]*gemMsg{}}
+			h := &geminiHandle{path: f, legacy: strings.HasSuffix(f, ".json"), t: tail{path: f, start: w.opt.Tail}, msgs: map[string]*gemMsg{}}
 			s := newSession(key, "gemini", h)
 			s.Cwd = cwd
 			s.CtxMax = 1_048_576
