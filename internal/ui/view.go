@@ -364,11 +364,15 @@ func (m *Model) drawEmpty(c *Canvas, x, y, w, h, ai int, split bool) {
 	}
 	var lines []ln
 	if ai < 0 {
+		where, start := "shoulder watches "+m.repo.Root, "start claude, codex, gemini or opencode in this project"
+		if m.all {
+			where, start = "shoulder watches all projects", "start claude, codex, gemini or opencode in any project"
+		}
 		lines = []ln{
 			{"no agents yet", Style{FG: t.FG(), Bold: true}},
-			{"shoulder watches " + m.repo.Root, Style{FG: t.Dim()}},
+			{where, Style{FG: t.Dim()}},
 			{"", Style{}},
-			{"start claude, codex, gemini or opencode in this project", Style{FG: t.Dim()}},
+			{start, Style{FG: t.Dim()}},
 			{"sessions from the last " + durText(m.opt.Since) + " show here", Style{FG: t.Faint()}},
 		}
 	} else {
@@ -480,9 +484,14 @@ func (m *Model) drawAgentRow(c *Canvas, x, y, w, i int) {
 	cx := c.text(x+1, y, right, glyph, Style{FG: glyphC}) + 1
 	cx = c.text(cx, y, right, tag(i), Style{FG: ac, Bold: true}) + 1
 	cx = c.text(cx, y, right-1, clip(a.Name, right-1-cx), Style{FG: t.FG()}) + 1
-	// The task tells apart agents of the same type.
+	// The task tells apart agents of the same type. An agent in another
+	// project shows the project first.
+	task := a.Task()
+	if a.Cwd != "" && !m.repo.Inside(a.Cwd) {
+		task = m.project(i) + " · " + task
+	}
 	if room := right - 1 - cx; room >= 4 {
-		c.text(cx, y, right-1, clip(a.Task(), room), Style{FG: t.Faint()})
+		c.text(cx, y, right-1, clip(task, room), Style{FG: t.Faint()})
 	}
 
 	bar := 0
@@ -584,10 +593,12 @@ func (m *Model) drawTerminal(c *Canvas, x, y, w, h, ai int) {
 	t := &m.theme
 	c.fill(x, y, w, h, t.Sunk())
 	cx := c.text(x+1, y, x+w, "TERMINAL", Style{FG: t.Dim(), Bold: true}) + 1
+	where := m.repo.Name
 	if ai >= 0 {
 		cx = c.text(cx, y, x+w, tag(ai), Style{FG: t.Agent(ai), Bold: true}) + 1
+		where = m.project(ai)
 	}
-	c.text(cx, y, x+w, "~/"+m.repo.Name, Style{FG: t.Dim()})
+	c.text(cx, y, x+w, "~/"+where, Style{FG: t.Dim()})
 	var lines []termLine
 	if ai >= 0 {
 		lines = m.termLines(ai)
@@ -615,7 +626,7 @@ func (m *Model) termLines(ai int) []termLine {
 	t := &m.theme
 	a := &m.snap.Agents[ai]
 	var out []termLine
-	prompt := m.repo.Name + " $ "
+	prompt := m.project(ai) + " $ "
 	for j := range a.Events {
 		e := &a.Events[j]
 		if e.Cmd == "" {
@@ -903,6 +914,9 @@ func (m *Model) drawTabs(c *Canvas, cur string) {
 	where := m.repo.Name
 	if b := m.repo.State.Branch; b != "" {
 		where += " · " + b
+	}
+	if m.all {
+		where = "all projects"
 	}
 	right := where + "  " + clock
 	rx := m.w - 1 - width(right)

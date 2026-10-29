@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Change the keys in `~/.config/shoulder/config.toml`. The help screen and the sidebar show your keys. See [Change the keys](README.md#change-the-keys). (#4)
+- Watch the agents of all projects. Press `A`, or start shoulder with `--all`. Each agent row shows the project of the agent.
 - Watch omp sessions. (#3)
 - Run shoulder with Nix: `nix run github:bjarneo/shoulder`. (#2)
 - `go install` builds print the module version for `shoulder --version`.

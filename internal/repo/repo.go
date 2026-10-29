@@ -23,6 +23,7 @@ type Repo struct {
 	// first holds the first content seen of each file outside git, as the
 	// baseline for the diff.
 	first map[string][]string
+	tops  map[string]string // the git top level of each directory outside Root
 }
 
 // State is the git state of the project. Refresh reads it.
@@ -43,7 +44,7 @@ type Change struct {
 // without a baseline from the last commit.
 func Open(dir string) *Repo {
 	dir, _ = filepath.Abs(dir)
-	r := &Repo{Root: dir, files: map[string]*File{}, first: map[string][]string{}}
+	r := &Repo{Root: dir, files: map[string]*File{}, first: map[string][]string{}, tops: map[string]string{}}
 	if out, err := git(dir, "rev-parse", "--show-toplevel"); err == nil {
 		r.Root = strings.TrimSpace(out)
 		r.Git = true
@@ -132,6 +133,19 @@ func (r *Repo) Apply(st State) {
 		}
 	}
 	r.State = st
+}
+
+// topOf returns the git top level of a directory, or "" outside git.
+func (r *Repo) topOf(dir string) string {
+	if t, ok := r.tops[dir]; ok {
+		return t
+	}
+	t := ""
+	if out, err := git(dir, "rev-parse", "--show-toplevel"); err == nil {
+		t = strings.TrimSpace(out)
+	}
+	r.tops[dir] = t
+	return t
 }
 
 // Rel returns path relative to the root, or the path itself when it is
@@ -247,11 +261,21 @@ func (r *Repo) File(path string) *File {
 
 // baseline returns the old content of a file: the version in HEAD, or the
 // first content that shoulder saw for a file outside git. It reports false
-// for a file that has no old version.
+// for a file that has no old version. A file in another project uses the
+// HEAD of its own repository.
 func (r *Repo) baseline(path string, f *File) ([]string, bool) {
-	if r.Git && r.Inside(path) {
-		rel := filepath.ToSlash(r.Rel(path))
-		out, err := git(r.Root, "show", "HEAD:"+rel)
+	top := ""
+	switch {
+	case r.Inside(path):
+		if r.Git {
+			top = r.Root
+		}
+	default:
+		top = r.topOf(filepath.Dir(path))
+	}
+	if top != "" {
+		rel, _ := filepath.Rel(top, path)
+		out, err := git(top, "show", "HEAD:"+filepath.ToSlash(rel))
 		if err != nil {
 			return nil, false
 		}

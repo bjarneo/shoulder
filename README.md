@@ -58,6 +58,7 @@ shoulder watches the git top level of the directory. It shows the sessions that 
 | `--since` | `1h` | Show sessions with activity in this period, for example `30m` or `6h` |
 | `--splits` | off | Start with one split per agent |
 | `--signs` | off | Show changes as signs in the gutter, without the deleted lines |
+| `--all` | off | Watch the agents of all projects, not only of this project |
 | `--version` | | Print the version |
 
 ## Supported agents
@@ -96,6 +97,17 @@ shoulder waits at least 1.5 seconds between two jumps, so agents that work at th
 
 To keep the focus on one agent, select it with `1` … `9`, `tab` or a click. This pins the agent and turns auto focus off. To turn auto focus on again, press `a`. The status line shows `auto` or `pinned`.
 
+## All projects
+
+To watch the agents of all projects, press `A` or start shoulder with `--all`. To go back to the agents of this project, press `A` again.
+
+- The row of an agent from another project starts with the name of that project, such as `preamp · Add a preset`.
+- The top line shows `all projects`.
+- The terminal pane shows the project of the agent in the prompt.
+- A file in another git repository shows the diff against the `HEAD` of that repository.
+
+Auto focus works the same way. It jumps to new edits in all projects.
+
 ## Agent states
 
 - `●` The agent runs a tool or writes a reply.
@@ -111,6 +123,7 @@ Gemini CLI logs when a tool call waits for approval. For the other agents, shoul
 | `1` … `9` | Pin an agent and follow it |
 | `tab`, `shift+tab` | Pin the next or the previous agent |
 | `a` | Turn auto focus on or off |
+| `A` | Switch between the agents of this project and of all projects |
 | `f` | Toggle follow and free scroll |
 | `esc` | Go back to follow |
 | `j`, `k` | Move the cursor |
@@ -150,6 +163,7 @@ shoulder stops with an error for an unknown action, an unknown key, or 2 actions
 |---|---|
 | `agent_next`, `agent_prev` | `tab`, `shift+tab` |
 | `auto` | `a` |
+| `all_projects` | `A` |
 | `follow` | `f` |
 | `back` | `esc` |
 | `down`, `up` | `j` `down`, `k` `up` |
@@ -180,6 +194,7 @@ In a git repository, shoulder compares each file with `HEAD`. Outside git, it co
 - shoulder reads opencode 2.x. It does not read the older `part` tables of opencode 1.x.
 - For Claude Code, Codex, opencode and omp, the approval state is an estimate. See [Agent states](#agent-states).
 - When omp moves a command to the background, shoulder shows it as running until omp writes the output of the finished job.
+- In all projects, `FILES` shows the git changes of this project only. For the other projects, it shows the files that agents edited.
 - The binaries are for Linux and macOS. shoulder is not tested on Windows.
 
 ## Develop

@@ -20,6 +20,7 @@ import (
 type Options struct {
 	Splits bool // start with one split per agent
 	Signs  bool // show changes as signs instead of inline deleted lines
+	All    bool // start with the agents of all projects
 	Since  time.Duration
 	Keys   *Keymap // nil for the default keys
 }
@@ -43,6 +44,7 @@ type Model struct {
 
 	focusKey string
 	auto     bool // the focus jumps to where agents work
+	all      bool // the agents of all projects show, not only of this project
 	want     *jumpTo
 	lastJump time.Time
 	follow   bool
@@ -145,7 +147,7 @@ func New(r *repo.Repo, w *watch.Watcher, opt Options) *Model {
 	}
 	return &Model{
 		opt: opt, repo: r, watcher: w, keys: keys, side: keys.sidebar(), helpTab: keys.help(),
-		follow: true, auto: true, splits: opt.Splits, inline: !opt.Signs,
+		follow: true, auto: true, all: opt.All, splits: opt.Splits, inline: !opt.Signs,
 		ftop: map[string]ftop{}, sweeps: map[string]*sweep{}, lastRead: map[string]string{},
 		edits: map[string][2]int{}, rows: map[string]*rowCache{}, hl: map[string]*highlighted{},
 		seen: map[string]time.Time{}, running: map[string]bool{},
@@ -263,7 +265,7 @@ func (m *Model) apply(s watch.Snapshot) tea.Cmd {
 	for i := range s.Agents {
 		a := &s.Agents[i]
 		label := tag(i) + " " + a.Name
-		if !first && !old[a.Key] {
+		if !first && !old[a.Key] && m.now.Sub(a.Updated) < recentFor {
 			m.msg = note{label + " started · " + a.Task(), m.theme.Agent(i)}
 		}
 		for j := range a.Events {
@@ -289,14 +291,16 @@ func (m *Model) apply(s watch.Snapshot) tea.Cmd {
 			if !e.Time.After(m.seen[a.Key]) {
 				continue
 			}
-			if !first {
+			// An agent that shows up later, such as after a switch to all
+			// projects, brings old events. Only recent events count.
+			if !first && m.now.Sub(e.Time) < recentFor {
 				switch e.Kind {
 				case watch.KindDone:
 					m.msg = note{label + " done · " + e.Text, m.theme.Agent(i)}
 				case watch.KindAsk:
 					m.msg = note{label + " asks you · " + e.Text, m.theme.Agent(i)}
 				case watch.KindEdit:
-					if e.File != "" && m.repo.Inside(e.File) && e.Time.After(newestAt) {
+					if e.File != "" && m.inScope(e.File) && e.Time.After(newestAt) {
 						newest, newestAt, newestFile = i, e.Time, e.File
 					}
 				}
@@ -338,6 +342,9 @@ func (m *Model) apply(s watch.Snapshot) tea.Cmd {
 func (m *Model) welcome() note {
 	n := len(m.snap.Agents)
 	if n == 0 {
+		if m.all {
+			return note{"no agent sessions in the last " + durText(m.opt.Since), m.theme.Dim()}
+		}
 		return note{"no agent sessions in " + m.repo.Root + " in the last " + durText(m.opt.Since) + " · start claude, codex, gemini or opencode here", m.theme.Dim()}
 	}
 	where := ""
@@ -345,6 +352,9 @@ func (m *Model) welcome() note {
 		where = " on " + m.repo.State.Branch
 	}
 	text := m.repo.Name + " · " + plural(n, "agent") + where
+	if m.all {
+		text = "all projects · " + plural(n, "agent")
+	}
 	if k := m.keys.first(actHelp); k != "" {
 		text += " · " + k + " for keys"
 	}
@@ -374,7 +384,7 @@ func (m *Model) latestEdit() (int, string) {
 		a := &m.snap.Agents[i]
 		for j := len(a.Events) - 1; j >= 0; j-- {
 			e := &a.Events[j]
-			if e.Kind == watch.KindEdit && e.File != "" && m.repo.Inside(e.File) {
+			if e.Kind == watch.KindEdit && e.File != "" && m.inScope(e.File) {
 				if e.Time.After(at) {
 					best, at, file = i, e.Time, e.File
 				}
@@ -384,6 +394,9 @@ func (m *Model) latestEdit() (int, string) {
 	}
 	return best, file
 }
+
+// recentFor is the age of the events that start messages and jumps.
+const recentFor = 30 * time.Second
 
 // autoDwell is the shortest time between two jumps of auto focus, so that
 // agents that work at the same time do not make the view flicker.
@@ -421,7 +434,7 @@ func (m *Model) autoStep() {
 	}
 	best := -1
 	for i := range m.snap.Agents {
-		if m.acts[i].Status != watch.Active || !m.poss[i].ok || !m.repo.Inside(m.poss[i].file) {
+		if m.acts[i].Status != watch.Active || !m.poss[i].ok || !m.inScope(m.poss[i].file) {
 			continue
 		}
 		if best < 0 || m.snap.Agents[i].Updated.After(m.snap.Agents[best].Updated) {
@@ -471,6 +484,32 @@ func (m *Model) toggleAuto() tea.Cmd {
 	}
 	m.autoStep()
 	return m.flashNote("auto focus is on · the focus jumps to new edits", m.theme.Dim())
+}
+
+// toggleAll switches between the agents of this project and the agents of
+// all projects.
+func (m *Model) toggleAll() tea.Cmd {
+	m.all = !m.all
+	if m.watcher != nil {
+		m.watcher.SetAll(m.all)
+	}
+	if m.all {
+		return m.flashNote("watching the agents of all projects", m.theme.Dim())
+	}
+	return m.flashNote("watching the agents in "+m.repo.Root, m.theme.Dim())
+}
+
+// inScope reports whether a file belongs to the watched projects.
+func (m *Model) inScope(p string) bool { return m.all || m.repo.Inside(p) }
+
+// project returns the project name of an agent: the name of this project,
+// or the last part of the directory of the agent.
+func (m *Model) project(i int) string {
+	cwd := m.snap.Agents[i].Cwd
+	if cwd == "" || m.repo.Inside(cwd) {
+		return m.repo.Name
+	}
+	return filepath.Base(cwd)
 }
 
 func (m *Model) focusIndex() int {
@@ -708,7 +747,7 @@ func (m *Model) highlightOf(f *repo.File) *highlighted {
 func (m *Model) buildTabs() {
 	first := map[string]time.Time{}
 	note := func(p string, t time.Time) {
-		if p == "" || !m.repo.Inside(p) || m.repo.File(p).Missing {
+		if p == "" || !m.inScope(p) || m.repo.File(p).Missing {
 			return
 		}
 		if old, ok := first[p]; !ok || t.Before(old) {
@@ -749,11 +788,11 @@ func (m *Model) buildFiles() {
 	}
 	for i := range m.snap.Agents {
 		a := &m.snap.Agents[i]
-		if !m.repo.Git {
-			for j := range a.Events {
-				if e := &a.Events[j]; e.Kind == watch.KindEdit && e.File != "" && !m.repo.File(e.File).Missing {
-					set[e.File] = true
-				}
+		for j := range a.Events {
+			// Outside git, and in other projects, the edits stand in for
+			// the git changes.
+			if e := &a.Events[j]; e.Kind == watch.KindEdit && e.File != "" && (!m.repo.Git || !m.repo.Inside(e.File)) && !m.repo.File(e.File).Missing {
+				set[e.File] = true
 			}
 		}
 		if i < len(m.acts) {
@@ -764,27 +803,28 @@ func (m *Model) buildFiles() {
 	}
 	var paths []string
 	for p := range set {
-		if m.repo.Inside(p) {
+		if m.inScope(p) {
 			paths = append(paths, p)
 		}
 	}
-	sort.Slice(paths, func(i, j int) bool { return m.repo.Rel(paths[i]) < m.repo.Rel(paths[j]) })
+	sort.Slice(paths, func(i, j int) bool { return m.rel(paths[i]) < m.rel(paths[j]) })
 	m.files = m.files[:0]
 	lastDir := "."
 	for _, p := range paths {
-		rel := m.repo.Rel(p)
+		rel := m.rel(p)
+		inside := m.repo.Inside(p)
 		dir := filepath.Dir(rel)
 		if dir != "." && dir != lastDir {
 			m.files = append(m.files, fileRow{dir: true, label: "▾ " + dir + "/"})
 		}
 		lastDir = dir
-		r := fileRow{path: p, label: filepath.Base(rel), inRepo: true}
+		r := fileRow{path: p, label: filepath.Base(rel), inRepo: inside}
 		if dir != "." {
 			r.label = "  " + r.label
 		}
-		if c, ok := m.repo.State.Changes[filepath.ToSlash(rel)]; ok {
+		if c, ok := m.repo.State.Changes[filepath.ToSlash(rel)]; ok && inside {
 			r.add, r.del, r.code = c.Add, c.Del, c.Code
-		} else if !m.repo.Git {
+		} else if !m.repo.Git || !inside {
 			f := m.repo.File(p)
 			r.add, r.del = f.Add+f.Mod, f.Del
 			switch {
@@ -852,6 +892,8 @@ func (m *Model) do(a action) tea.Cmd {
 		}
 	case actAuto:
 		return m.toggleAuto()
+	case actAllProjects:
+		return m.toggleAll()
 	case actFollow:
 		if m.following() {
 			m.toNormal()

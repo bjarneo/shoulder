@@ -32,7 +32,7 @@ func (c *claude) scan(w *Watcher, cutoff time.Time) {
 	dirs, _ := os.ReadDir(c.dir)
 	for _, d := range dirs {
 		name := d.Name()
-		if !d.IsDir() || (name != prefix && !strings.HasPrefix(name, prefix+"-")) {
+		if !d.IsDir() || (!w.opt.All && name != prefix && !strings.HasPrefix(name, prefix+"-")) {
 			continue
 		}
 		pdir := filepath.Join(c.dir, name)

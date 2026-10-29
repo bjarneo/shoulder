@@ -1,6 +1,7 @@
 package watch
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -345,4 +346,48 @@ func TestTailSkipsPartialLines(t *testing.T) {
 	if strings.Join(got, ",") != "one,two,three" {
 		t.Fatalf("lines: %v", got)
 	}
+}
+
+func TestWatchAllProjects(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	for _, v := range []string{"CLAUDE_CONFIG_DIR", "CODEX_HOME", "GEMINI_CLI_HOME", "XDG_DATA_HOME", "PI_CODING_AGENT_DIR", "PI_CODING_AGENT_SESSION_DIR"} {
+		t.Setenv(v, "")
+	}
+	rootA, rootB := filepath.Join(home, "Code", "a"), filepath.Join(home, "Code", "b")
+	for _, root := range []string{rootA, rootB} {
+		dir := filepath.Join(home, ".claude", "projects", nonAlnum.ReplaceAllString(root, "-"))
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		now := time.Now().UTC().Format(time.RFC3339)
+		line := `{"type":"user","cwd":"` + root + `","timestamp":"` + now + `","message":{"role":"user","content":"work in ` + filepath.Base(root) + `"}}` + "\n"
+		if err := os.WriteFile(filepath.Join(dir, "s.jsonl"), []byte(line), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w := New(Options{Root: rootA, Since: time.Hour})
+	snaps := make(chan Snapshot, 16)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go w.Run(ctx, func(s Snapshot) { snaps <- s })
+	wait := func(n int) {
+		t.Helper()
+		deadline := time.After(3 * time.Second)
+		for {
+			select {
+			case s := <-snaps:
+				if len(s.Agents) == n {
+					return
+				}
+			case <-deadline:
+				t.Fatalf("no snapshot with %d agents", n)
+			}
+		}
+	}
+	wait(1)
+	w.SetAll(true)
+	wait(2)
+	w.SetAll(false)
+	wait(1)
 }

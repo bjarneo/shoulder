@@ -275,3 +275,64 @@ func TestEditCursorFollowsText(t *testing.T) {
 		t.Fatalf("agent should be editing: %+v", m.acts[0])
 	}
 }
+
+func TestAllProjects(t *testing.T) {
+	m, _ := fixture(t)
+	other := t.TempDir()
+	path := filepath.Join(other, "notes.md")
+	if err := os.WriteFile(path, []byte("# notes\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	agents := append([]watch.Agent(nil), m.snap.Agents...)
+	agents = append(agents, watch.Agent{
+		Key: "codex:other", Source: "codex", Name: "codex", Prompt: "write notes", Cwd: other,
+		Started: time.Now(), Updated: time.Now(),
+		Events: []watch.Event{{Time: time.Now(), Kind: watch.KindEdit, File: path, Needle: "# notes", Line: -1, EndLine: -1}},
+	})
+	m.Update(Snapshot(watch.Snapshot{Agents: agents}))
+	hasFile := func() bool {
+		for _, f := range m.files {
+			if f.path == path {
+				return true
+			}
+		}
+		return false
+	}
+	if hasFile() || contains(m.tabs, path) {
+		t.Fatal("a file of another project shows in project mode")
+	}
+	m.key("A")
+	if !m.all {
+		t.Fatal("A does not turn on all projects")
+	}
+	m.Update(Snapshot(watch.Snapshot{Agents: agents}))
+	if !hasFile() || !contains(m.tabs, path) {
+		t.Fatal("the file of another project is missing in all projects")
+	}
+	out := checkFrame(t, m, 180, 50, "all")
+	if !strings.Contains(out, filepath.Base(other)+" · ") || !strings.Contains(out, "all projects") {
+		t.Fatal("the agent row or the top line does not show the project")
+	}
+	m.key("A")
+	if m.all {
+		t.Fatal("A does not turn off all projects")
+	}
+}
+
+func TestOldEventsDoNotJump(t *testing.T) {
+	m, dir := fixture(t)
+	m.pin(1)
+	m.toggleAuto()
+	m.lastJump = time.Time{}
+	agents := append([]watch.Agent(nil), m.snap.Agents...)
+	old := time.Now().Add(-16 * time.Hour)
+	agents = append(agents, watch.Agent{
+		Key: "claude:old", Source: "claude", Name: "claude", Cwd: dir, Started: old, Updated: old, TurnEnded: true,
+		Events: []watch.Event{{Time: old, Kind: watch.KindEdit, File: filepath.Join(dir, "main.go"), Needle: "package", Line: -1, EndLine: -1}},
+	})
+	focus := m.focusKey
+	m.Update(Snapshot(watch.Snapshot{Agents: agents}))
+	if m.focusKey != focus {
+		t.Fatalf("an old edit moved the focus to %s", m.focusKey)
+	}
+}

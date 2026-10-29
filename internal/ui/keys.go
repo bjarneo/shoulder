@@ -19,6 +19,7 @@ const (
 	actAgentNext
 	actAgentPrev
 	actAuto
+	actAllProjects
 	actFollow
 	actBack
 	actDown
@@ -49,6 +50,7 @@ var actions = []struct {
 	{actAgentNext, "agent_next", []string{"tab"}},
 	{actAgentPrev, "agent_prev", []string{"shift+tab"}},
 	{actAuto, "auto", []string{"a"}},
+	{actAllProjects, "all_projects", []string{"A"}},
 	{actFollow, "follow", []string{"f"}},
 	{actBack, "back", []string{"esc"}},
 	{actDown, "down", []string{"j", "down"}},
@@ -278,6 +280,7 @@ var helpRows = []struct {
 	{nil, "pin an agent and follow it"},
 	{[]action{actAgentNext, actAgentPrev}, "pin the next / previous agent"},
 	{[]action{actAuto}, "auto focus: jump to new edits ↔ stay"},
+	{[]action{actAllProjects}, "this project ↔ all projects"},
 	{[]action{actFollow}, "toggle follow / free scroll"},
 	{[]action{actBack}, "back to follow"},
 	{[]action{actDown, actUp}, "move the cursor down / up"},

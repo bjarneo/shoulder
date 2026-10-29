@@ -11,6 +11,7 @@ import (
 // Options selects the sessions to watch.
 type Options struct {
 	Root  string        // project directory; sessions in it or below it match
+	All   bool          // watch the sessions of all projects
 	Since time.Duration // ignore sessions without activity in this period
 }
 
@@ -33,6 +34,7 @@ type Watcher struct {
 	sessions map[string]*session
 	notes    map[string]string
 	reload   chan struct{}
+	scope    chan bool
 	lastScan time.Time
 }
 
@@ -45,7 +47,7 @@ const (
 // New creates a watcher for the project in opt.Root.
 func New(opt Options) *Watcher {
 	opt.Root = filepath.Clean(opt.Root)
-	w := &Watcher{opt: opt, reload: make(chan struct{}, 1)}
+	w := &Watcher{opt: opt, reload: make(chan struct{}, 1), scope: make(chan bool, 1)}
 	w.init()
 	return w
 }
@@ -64,6 +66,16 @@ func (w *Watcher) Reload() {
 	}
 }
 
+// SetAll switches between the sessions of the project and the sessions of
+// all projects, and reads the sessions again.
+func (w *Watcher) SetAll(all bool) {
+	select {
+	case <-w.scope:
+	default:
+	}
+	w.scope <- all
+}
+
 // Run polls until ctx ends. It calls send with a new snapshot after each
 // change.
 func (w *Watcher) Run(ctx context.Context, send func(Snapshot)) {
@@ -76,6 +88,12 @@ func (w *Watcher) Run(ctx context.Context, send func(Snapshot)) {
 		select {
 		case <-ctx.Done():
 			return
+		case all := <-w.scope:
+			w.opt.All = all
+			w.closeSources()
+			w.init()
+			w.step(true)
+			send(w.snapshot())
 		case <-w.reload:
 			w.closeSources()
 			w.init()
@@ -125,9 +143,13 @@ func (w *Watcher) add(s *session) { w.sessions[s.Key] = s }
 func (w *Watcher) note(key, msg string) { w.notes[key] = msg }
 
 // inRoot reports whether dir is the project root or a directory below it.
+// When the watcher watches all projects, each directory matches.
 func (w *Watcher) inRoot(dir string) bool {
 	if dir == "" {
 		return false
+	}
+	if w.opt.All {
+		return true
 	}
 	dir = filepath.Clean(dir)
 	return dir == w.opt.Root || strings.HasPrefix(dir, w.opt.Root+string(filepath.Separator))

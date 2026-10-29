@@ -26,6 +26,7 @@ func main() {
 	since := flag.Duration("since", time.Hour, "show sessions with activity in this period")
 	splits := flag.Bool("splits", false, "start with one split per agent")
 	signs := flag.Bool("signs", false, "show changes as signs instead of inline deleted lines")
+	all := flag.Bool("all", false, "watch the agents of all projects, not only of dir")
 	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Usage = func() {
 		fmt.Fprintln(os.Stderr, "Usage: shoulder [flags] [dir]")
@@ -69,8 +70,8 @@ func main() {
 	}
 
 	r := repo.Open(dir)
-	w := watch.New(watch.Options{Root: r.Root, Since: *since})
-	m := ui.New(r, w, ui.Options{Splits: *splits, Signs: *signs, Since: *since, Keys: keys})
+	w := watch.New(watch.Options{Root: r.Root, All: *all, Since: *since})
+	m := ui.New(r, w, ui.Options{Splits: *splits, Signs: *signs, All: *all, Since: *since, Keys: keys})
 	p := tea.NewProgram(m)
 
 	ctx, cancel := context.WithCancel(context.Background())
