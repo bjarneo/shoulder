@@ -253,6 +253,80 @@ func TestOpencodeMessages(t *testing.T) {
 	}
 }
 
+func TestOmpSession(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("PI_CODING_AGENT_DIR", dir)
+	proj := filepath.Join(dir, "sessions", "--w--")
+	if err := os.MkdirAll(proj, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(proj, "2026-10-27T10-00-00-000Z_ab.jsonl")
+	lines := []string{
+		`{"type":"title","v":1,"title":"Fix the build","source":"auto"}`,
+		`{"type":"session","version":3,"id":"ab","timestamp":"2026-10-27T10:00:00.000Z","cwd":"/w"}`,
+		`{"type":"message","id":"m1","parentId":null,"timestamp":"2026-10-27T10:00:00.000Z","message":{"role":"user","content":[{"type":"text","text":"fix the build"}],"attribution":"user"}}`,
+		`{"type":"message","id":"m2","parentId":"m1","timestamp":"2026-10-27T10:00:01.000Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"look at the tests"},{"type":"text","text":"I will run the tests."},{"type":"toolCall","id":"c1","name":"bash","arguments":{"command":"go test ./...","i":"Running the tests"}}],"stopReason":"toolUse"}}`,
+		`{"type":"message","id":"m3","parentId":"m2","timestamp":"2026-10-27T10:00:02.000Z","message":{"role":"toolResult","toolCallId":"c1","toolName":"bash","content":[{"type":"text","text":"--- FAIL: TestX"}],"details":{"exitCode":1,"wallTimeMs":12},"isError":true}}`,
+		`{"type":"message","id":"m4","parentId":"m3","timestamp":"2026-10-27T10:00:03.000Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"c2","name":"read","arguments":{"path":"/w/main.go","offset":10,"limit":5}}],"stopReason":"toolUse"}}`,
+		`{"type":"message","id":"m5","parentId":"m4","timestamp":"2026-10-27T10:00:04.000Z","message":{"role":"toolResult","toolCallId":"c2","toolName":"read","content":[{"type":"text","text":"10:package main"}],"details":{"totalLines":40},"isError":false}}`,
+		`{"type":"message","id":"m6","parentId":"m5","timestamp":"2026-10-27T10:00:05.000Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"c3","name":"edit","arguments":{"path":"/w/main.go","old_string":"x := 1","new_string":"x := 2\n y := 3"}}],"stopReason":"toolUse"}}`,
+		`{"type":"message","id":"m7","parentId":"m6","timestamp":"2026-10-27T10:00:06.000Z","message":{"role":"toolResult","toolCallId":"c3","toolName":"edit","content":[{"type":"text","text":"ok"}],"details":{"path":"/w/main.go","firstChangedLine":4,"op":"update"},"isError":false}}`,
+		`{"type":"message","id":"m8","parentId":"m7","timestamp":"2026-10-27T10:00:07.000Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"c4","name":"hub","arguments":{"op":"find","i":"Looking for a daemon"}}],"stopReason":"toolUse"}}`,
+		`{"type":"message","id":"m9","parentId":"m8","timestamp":"2026-10-27T10:00:08.000Z","message":{"role":"toolResult","toolCallId":"c4","toolName":"hub","content":[{"type":"text","text":"Tool hub not found"}],"details":{"isError":true},"isError":true}}`,
+		`{"type":"message","id":"m10","parentId":"m9","timestamp":"2026-10-27T10:00:09.000Z","message":{"role":"assistant","content":[{"type":"text","text":"The build is fixed."}],"stopReason":"stop","contextSnapshot":{"promptTokens":12345}}}`,
+	}
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	w := New(Options{Root: "/w", Since: time.Hour})
+	newOmp().scan(w, time.Now().Add(-time.Hour))
+	s := w.sessions["omp:"+path]
+	if s == nil {
+		t.Fatal("session not found")
+	}
+	if err := s.h.poll(s); err != nil {
+		t.Fatal(err)
+	}
+	if s.Title != "Fix the build" || s.Prompt != "fix the build" {
+		t.Fatalf("title %q prompt %q", s.Title, s.Prompt)
+	}
+	var kinds []Kind
+	for _, e := range s.Events {
+		kinds = append(kinds, e.Kind)
+	}
+	want := []Kind{KindYou, KindSay, KindRun, KindRead, KindEdit, KindTool, KindSay, KindDone}
+	if strings.Join(kindStrings(kinds), ",") != strings.Join(kindStrings(want), ",") {
+		t.Fatalf("kinds: %v", kinds)
+	}
+	if e := s.Events[2]; e.Cmd != "go test ./..." || e.Result != Failed || e.Exit != 1 {
+		t.Fatalf("run: %+v", e)
+	}
+	if e := s.Events[3]; e.File != "/w/main.go" || e.Line != 9 || e.EndLine != 13 {
+		t.Fatalf("read: %+v", e)
+	}
+	if e := s.Events[4]; e.File != "/w/main.go" || e.Needle != "x := 2\n y := 3" || e.Line != 3 || e.Add != 2 || e.Del != 1 {
+		t.Fatalf("edit: %+v", e)
+	}
+	if e := s.Events[5]; e.Tool != "hub" || e.Text != "Looking for a daemon" || e.Result != Failed {
+		t.Fatalf("unknown tool: %+v", e)
+	}
+	if s.Ctx != 12345 || !s.TurnEnded {
+		t.Fatalf("ctx %d ended %v", s.Ctx, s.TurnEnded)
+	}
+	appendLines(t, path, []string{
+		`{"type":"message","id":"m11","parentId":"m10","timestamp":"2026-10-27T10:00:10.000Z","message":{"role":"user","content":[{"type":"text","text":"also fix the docs"}],"attribution":"user"}}`,
+	})
+	if err := s.h.poll(s); err != nil {
+		t.Fatal(err)
+	}
+	if len(s.Events) != len(want)+1 {
+		t.Fatalf("events after one appended line: %+v", s.Events)
+	}
+	if e := s.Events[len(s.Events)-1]; e.Kind != KindYou || e.Text != "also fix the docs" {
+		t.Fatalf("appended prompt: %+v", e)
+	}
+}
+
 func TestTailSkipsPartialLines(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "log.jsonl")
 	if err := os.WriteFile(path, []byte("one\ntw"), 0o644); err != nil {
