@@ -181,7 +181,7 @@ func editor(cfg config.Config) string {
 		// omarchy-launch-editor puts "--" before its arguments, so the
 		// editor reads "+LINE" as a file name. Run the editor that Omarchy
 		// selects instead.
-		if f := strings.Fields(e); len(f) > 0 && filepath.Base(f[0]) == "omarchy-launch-editor" {
+		if f := config.SplitCommand(e); len(f) > 0 && filepath.Base(f[0]) == "omarchy-launch-editor" {
 			return omarchyEditor()
 		}
 		return e

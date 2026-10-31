@@ -109,3 +109,22 @@ func TestLoad(t *testing.T) {
 		t.Fatalf("got %v", err)
 	}
 }
+
+func TestSplitCommand(t *testing.T) {
+	cases := map[string][]string{
+		"nvim":                     {"nvim"},
+		"  code   --wait ":         {"code", "--wait"},
+		`"/a b/code" -w`:           {"/a b/code", "-w"},
+		`'/a b/code' -w`:           {"/a b/code", "-w"},
+		`/a\ b/vim -p`:             {"/a b/vim", "-p"},
+		`emacsclient -a ""`:        {"emacsclient", "-a", ""},
+		`vim "-c" "set \"x\""`:     {"vim", "-c", `set "x"`},
+		`"C:\Program Files\x.exe"`: {`C:\Program Files\x.exe`},
+		"":                         nil,
+	}
+	for in, want := range cases {
+		if got := SplitCommand(in); !reflect.DeepEqual(got, want) {
+			t.Errorf("%q: got %q, want %q", in, got, want)
+		}
+	}
+}

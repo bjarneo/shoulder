@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // Binding is one setting of the [keys] table: an action and its keys.
@@ -261,4 +262,50 @@ func str(s string) (string, string, error) {
 func isComment(s string) bool {
 	s = strings.TrimSpace(s)
 	return s == "" || s[0] == '#'
+}
+
+// SplitCommand splits a command line, such as the editor setting, into
+// words. It reads single quotes, double quotes and backslash escapes as a
+// shell does. It does not expand variables.
+func SplitCommand(s string) []string {
+	var words []string
+	var w []rune
+	started := false
+	rs := []rune(s)
+	for i := 0; i < len(rs); i++ {
+		r := rs[i]
+		switch {
+		case r == '\'':
+			started = true
+			for i++; i < len(rs) && rs[i] != '\''; i++ {
+				w = append(w, rs[i])
+			}
+		case r == '"':
+			started = true
+			for i++; i < len(rs) && rs[i] != '"'; i++ {
+				// In double quotes, a backslash escapes only a quote or a
+				// backslash.
+				if rs[i] == '\\' && i+1 < len(rs) && (rs[i+1] == '"' || rs[i+1] == '\\') {
+					i++
+				}
+				w = append(w, rs[i])
+			}
+		case r == '\\' && i+1 < len(rs):
+			started = true
+			i++
+			w = append(w, rs[i])
+		case unicode.IsSpace(r):
+			if started {
+				words = append(words, string(w))
+				w, started = w[:0], false
+			}
+		default:
+			started = true
+			w = append(w, r)
+		}
+	}
+	if started {
+		words = append(words, string(w))
+	}
+	return words
 }
