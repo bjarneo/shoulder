@@ -50,7 +50,7 @@ func main() {
 		fmt.Fprintln(os.Stderr)
 		fmt.Fprintln(os.Stderr, "To change the defaults and the keys, edit "+p+", or the file in SHOULDER_CONFIG.")
 	}
-	flag.Parse()
+	args, _ := parseArgs(flag.CommandLine, os.Args[1:])
 	if *showVersion {
 		// go install builds carry the module version instead of ldflags.
 		if info, ok := debug.ReadBuildInfo(); ok && version == "dev" && info.Main.Version != "(devel)" && info.Main.Version != "" {
@@ -60,7 +60,7 @@ func main() {
 		return
 	}
 
-	dir := dirArg(flag.CommandLine)
+	dir := dirArg(args)
 	cfg := loadConfig()
 	set := flagsSet(flag.CommandLine)
 	defaults(set, cfg, since, all)
@@ -97,18 +97,50 @@ func main() {
 	}
 }
 
-// dirArg returns the directory argument, or ".". It stops the program when
-// the argument is not a directory.
-func dirArg(fs *flag.FlagSet) string {
-	dir := "."
-	if fs.NArg() > 0 {
-		dir = fs.Arg(0)
+// parseArgs parses the flags in args, also the flags after the dir
+// argument, such as "shoulder ~/proj --all". It returns the arguments that
+// are not flags. The arguments after "--" are never flags.
+func parseArgs(fs *flag.FlagSet, args []string) ([]string, error) {
+	var rest []string
+	for {
+		if err := fs.Parse(args); err != nil {
+			return nil, err
+		}
+		left := fs.Args()
+		if used := len(args) - len(left); used > 0 && args[used-1] == "--" {
+			return append(rest, left...), nil
+		}
+		if len(left) == 0 {
+			return rest, nil
+		}
+		rest = append(rest, left[0])
+		args = left[1:]
 	}
-	if st, err := os.Stat(dir); err != nil || !st.IsDir() {
-		fmt.Fprintf(os.Stderr, "shoulder: %s is not a directory\n", dir)
+}
+
+// dirArg returns the directory argument, or ".". It stops the program when
+// the argument is not a directory, or when there is more than one argument.
+func dirArg(args []string) string {
+	dir, err := dirOf(args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "shoulder:", err)
 		os.Exit(2)
 	}
 	return dir
+}
+
+// dirOf returns the directory argument, or "." when there is none.
+func dirOf(args []string) (string, error) {
+	switch len(args) {
+	case 0:
+		return ".", nil
+	case 1:
+		if st, err := os.Stat(args[0]); err != nil || !st.IsDir() {
+			return "", fmt.Errorf("%s is not a directory", args[0])
+		}
+		return args[0], nil
+	}
+	return "", fmt.Errorf("give one directory, not %d: %s", len(args), strings.Join(args, " "))
 }
 
 // loadConfig reads the config file. It stops the program on an error.

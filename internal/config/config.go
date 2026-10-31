@@ -5,6 +5,7 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -76,8 +77,10 @@ func Load() (Config, error) {
 
 var bareKey = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 
-// Parse reads the content of a config file.
+// Parse reads the content of a config file. It ignores a UTF-8 byte order
+// mark at the start.
 func Parse(b []byte) (Config, error) {
+	b = bytes.TrimPrefix(b, []byte("\xef\xbb\xbf"))
 	var c Config
 	table := ""
 	seen := map[string]int{}

@@ -50,6 +50,15 @@ quit = "x"
 	}
 }
 
+func TestParseByteOrderMark(t *testing.T) {
+	for _, in := range []string{"\ufeff# shoulder\nall = true\n", "\ufeffall = true\r\n"} {
+		c, err := Parse([]byte(in))
+		if err != nil || c.All == nil || !*c.All {
+			t.Errorf("%q: got %+v %v", in, c, err)
+		}
+	}
+}
+
 func TestParseErrors(t *testing.T) {
 	cases := map[string]string{
 		"hunk_next = \"n\"":              "line 1: unknown setting \"hunk_next\". The settings are since",

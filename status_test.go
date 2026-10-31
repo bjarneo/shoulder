@@ -33,3 +33,11 @@ func TestSummarize(t *testing.T) {
 		t.Fatalf("no agents: %+v", empty)
 	}
 }
+
+func TestWaybarEscapesMarkup(t *testing.T) {
+	in := barStatus{Text: "●1 ○0 ✓0", Tooltip: `● A1 claude · p · running · fix Vec<T> & "a" > 'b'`, Class: "active", Alt: "active"}
+	want := barStatus{Text: "●1 ○0 ✓0", Tooltip: "● A1 claude · p · running · fix Vec&lt;T&gt; &amp; &quot;a&quot; &gt; &#39;b&#39;", Class: "active", Alt: "active"}
+	if got := waybar(in); got != want {
+		t.Fatalf("got %+v\nwant %+v", got, want)
+	}
+}

@@ -42,18 +42,30 @@ func status(args []string) {
 		fmt.Fprintln(os.Stderr)
 		fs.PrintDefaults()
 	}
-	_ = fs.Parse(args)
-	dir := dirArg(fs)
+	rest, _ := parseArgs(fs, args)
+	dir := dirArg(rest)
 	defaults(flagsSet(fs), loadConfig(), since, all)
 
 	r := repo.Open(dir)
 	s := watch.New(watch.Options{Root: r.Root, All: *all, Since: *since, Tail: statusTail}).Once()
 	out := summarize(s, r, time.Now())
 	if *asJSON {
-		_ = json.NewEncoder(os.Stdout).Encode(out)
+		_ = json.NewEncoder(os.Stdout).Encode(waybar(out))
 		return
 	}
 	fmt.Println(out.Text)
+}
+
+// markup escapes text for Pango markup.
+var markup = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&quot;", "'", "&#39;")
+
+// waybar returns out with the text and the tooltip escaped for Pango
+// markup, because Waybar reads both as markup. Without the escape, a prompt
+// such as "a < b" gives an empty tooltip.
+func waybar(out barStatus) barStatus {
+	out.Text = markup.Replace(out.Text)
+	out.Tooltip = markup.Replace(out.Tooltip)
+	return out
 }
 
 // summarize counts the agents by state and lists them for the tooltip.
