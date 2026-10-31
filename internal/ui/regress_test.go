@@ -444,7 +444,7 @@ func TestEmptyStateHints(t *testing.T) {
 	if strings.Contains(out, "free ·") {
 		t.Error("the winbar shows free scroll without an agent")
 	}
-	for _, want := range []string{"opencode or omp", "press A to watch the agents of all projects"} {
+	for _, want := range []string{"omp or auggie", "press A to watch the agents of all projects"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("the empty state does not show %q", want)
 		}
