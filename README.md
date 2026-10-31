@@ -94,9 +94,11 @@ shoulder only reads. It does not send input to an agent, it does not change file
 ## Screen
 
 - The left panel lists the agents and the changed files. A dot next to a file shows which agent is in that file now.
+- Each agent has a tag, such as `A1`, and a color. The agent keeps its tag and its color while it is in the list.
+- When the terminal is too narrow for the left panel, the top bar shows a row of the agents.
 - The center pane shows the file of the focused agent. A cursor and a label, such as `● A1 editing`, show where the agent works.
 - In the inline diff, deleted lines show in red above the new lines. Added and changed lines have a green background. Press `d` to show the changes as signs in the gutter.
-- The terminal pane under the file shows the commands of the focused agent and their output. A command with more lines, such as a script in a heredoc, shows its first 5 lines.
+- The terminal pane under the file shows the commands of the focused agent and their output, with the colors of the output. A command with more lines, such as a script in a heredoc, shows its first 5 lines.
 - The right panel shows the activity log of the focused agent: reads, searches, edits, commands, replies and prompts.
 - Press `s` for the split layout. Each agent gets a pane with its file and its activity log.
 
@@ -139,7 +141,7 @@ Auto focus is on when shoulder starts. The view jumps to the work of the agents:
 
 shoulder waits at least 1.5 seconds between two jumps, so agents that work at the same time do not make the view flicker. In free scroll, the view does not jump.
 
-To keep the focus on one agent, select it with `1` … `9`, `tab` or a click. This pins the agent and turns auto focus off. To turn auto focus on again, press `a`. The status line shows `auto` or `pinned`.
+To keep the focus on one agent, select it with `1` … `9`, `tab` or a click. The key `3` selects `A3`. This pins the agent and turns auto focus off. To turn auto focus on again, press `a`. The status line shows `auto` or `pinned`.
 
 ## Commands
 
@@ -201,13 +203,17 @@ set -g status-interval 5
 - `○` The agent waits for you. It asked a question, or a tool call needs your approval.
 - `✓` The turn ended. The state is `idle` when the agent had no activity for 10 minutes.
 
+A command, a task or a web call that runs for 1 minute or more shows how long it runs, such as `47m · $ go test ./...`. A wait for you shows how long it waits. When a call has no result and the session log gets no write for 30 minutes, the agent stopped. Its state is then `idle`, with `no result`.
+
+A session with no activity in the `--since` period leaves the list. It comes back when the agent works again.
+
 Gemini CLI logs when a tool call waits for approval. For the other agents, shoulder assumes approval when a file tool has no result after 20 seconds.
 
 ## Keys
 
 | Key | Action |
 |---|---|
-| `1` … `9` | Pin an agent and follow it |
+| `1` … `9` | Pin the agent with that tag, such as `A3` for `3` |
 | `tab`, `shift+tab` | Pin the next or the previous agent |
 | `a` | Turn auto focus on or off |
 | `A` | Switch between the agents of this project and of all projects |
