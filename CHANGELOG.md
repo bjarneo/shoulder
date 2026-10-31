@@ -1,5 +1,33 @@
 # Changelog
 
+## v0.3.2 · 2026-10-31
+
+This release fixes a crash, the Nix build, and agent states that did not change. It also makes the screen easier to read.
+
+- The Nix build works again. `nix run github:bjarneo/shoulder` failed since v0.3.0, and CI now builds the flake.
+- `d` no longer crashes shoulder after an agent makes the file of the free view shorter.
+- An agent that stops during a command no longer shows `running` forever. A long call shows how long it runs, such as `47m · $ go test ./...`.
+- A Claude Code turn that starts with a task notification shows the agent as working, not `done`.
+- Codex: background commands, their output and repeated prompts show correctly. Resumed threads show again.
+- Gemini CLI: a turn that ends with an error ends.
+- A session with no activity in the `--since` period leaves the list.
+- Each agent keeps its tag and its color. `1` … `9` pin by tag.
+- A long path keeps its end, so the file name shows.
+- The terminal pane shows the colors of the command output.
+- Emoji and CJK text no longer break the layout.
+- In a narrow terminal, the top bar shows a row of the agents.
+- A key that does nothing shows a short note.
+- The empty state counts the agents in other projects and shows the key that watches all projects.
+- Syntax highlighting runs in the background, so a large file does not freeze the screen.
+- A refresh of a repo with many untracked files takes 28 ms, down from 214 ms.
+- Git status: copies, renames in the work tree, submodules and changes of line endings show correctly.
+- The shell parser reads quotes, escapes, subshells and `cd -`.
+- Flags after the directory work, such as `shoulder ~/proj --all`.
+- The editor command can have quotes, such as a path with spaces.
+- `shoulder status --json` escapes the Waybar text and tooltip.
+- The config file can start with a byte order mark.
+- `ctrl+c` quits while the help box is open.
+
 ## v0.3.1 · 2026-10-29
 
 - `e` opens the file in one buffer at the cursor line when `EDITOR` is `omarchy-launch-editor`. Before, Neovim opened an empty buffer named `+LINE` and the file in a second buffer.
