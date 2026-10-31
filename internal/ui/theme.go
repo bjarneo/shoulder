@@ -5,6 +5,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	xansi "github.com/charmbracelet/x/ansi"
 )
 
 // Color is a terminal color. The zero value means "keep the color that is
@@ -27,6 +29,21 @@ var (
 )
 
 func ansi(i int) Color { return Color{k: ckIndex, v: uint32(i)} }
+
+// colorOf converts the color of an SGR sequence. The 16 basic colors stay
+// the colors of the terminal theme.
+func colorOf(c color.Color) Color {
+	switch c := c.(type) {
+	case nil:
+		return none
+	case xansi.BasicColor:
+		return ansi(int(c))
+	case xansi.IndexedColor:
+		return ansi(int(c))
+	}
+	r, g, b, _ := c.RGBA()
+	return Color{k: ckRGB, v: r>>8<<16 | g>>8<<8 | b>>8}
+}
 
 type rgb struct{ r, g, b float64 }
 

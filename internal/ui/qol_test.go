@@ -41,8 +41,8 @@ func TestHideDoneKeepsFocusedAgent(t *testing.T) {
 	m, _ := fixture(t)
 	m.pin(2)
 	m.key("x")
-	if len(m.snap.Agents) != 3 || tag(m.focusIndex()) != "A3" {
-		t.Fatalf("the focused agent is hidden: %d agents, focus %s", len(m.snap.Agents), tag(m.focusIndex()))
+	if len(m.snap.Agents) != 3 || m.tag(m.focusIndex()) != "A3" {
+		t.Fatalf("the focused agent is hidden: %d agents, focus %s", len(m.snap.Agents), m.tag(m.focusIndex()))
 	}
 }
 
@@ -61,6 +61,10 @@ func TestEditorArgs(t *testing.T) {
 		"subl -n":       {"subl", "-n", "/w/a.go:12"},
 		"kak -n":        {"kak", "-n", "+12", "/w/a.go"},
 		"code-insiders": {"code-insiders", "-g", "/w/a.go:12"},
+		`"/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code" -w`: {
+			"/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code", "-w", "-g", "/w/a.go:12",
+		},
+		`/opt/my\ editors/nvim`: {"/opt/my editors/nvim", "+12", "/w/a.go"},
 	}
 	for ed, want := range cases {
 		if got := editorArgs(ed, "/w/a.go", 11); !reflect.DeepEqual(got, want) {

@@ -282,12 +282,13 @@ func (k *Keymap) first(a action) string {
 }
 
 // helpRows lists the rows of the help screen. A row has 1 action, or 2
-// actions that go in opposite directions. The keys of 1 … 9 do not change.
+// actions that go in opposite directions. The keys of 1 … 9 do not change:
+// a digit pins the agent with that tag, such as 3 for A3.
 var helpRows = []struct {
 	acts []action
 	text string
 }{
-	{nil, "pin an agent and follow it"},
+	{nil, "pin agent A1 … A9 and follow it"},
 	{[]action{actAgentNext, actAgentPrev}, "pin the next / previous agent"},
 	{[]action{actAuto}, "auto focus: jump to new edits ↔ stay"},
 	{[]action{actAllProjects}, "this project ↔ all projects"},
@@ -339,8 +340,12 @@ func (k *Keymap) sidebar() [][2]string {
 	join := func(s ...string) string {
 		return strings.Join(slices.DeleteFunc(s, func(x string) bool { return x == "" }), " ")
 	}
+	pin := "pin A1-A9"
+	if k.first(actAgentNext) != "" {
+		pin += " / next"
+	}
 	rows := [][2]string{
-		{join("1-9", k.first(actAgentNext)), "pin agent"},
+		{join("1-9", k.first(actAgentNext)), pin},
 		{k.first(actAuto), "auto focus"},
 		{join(k.first(actFollow), k.first(actBack)), "free scroll / follow"},
 		{join(k.first(actDown), k.first(actUp), k.first(actTop), k.first(actBottom)), "move"},

@@ -9,6 +9,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/bjarneo/shoulder/internal/config"
 	"github.com/bjarneo/shoulder/internal/watch"
 )
 
@@ -42,7 +43,7 @@ func (m *Model) refilter() tea.Cmd {
 	if !m.hideDone {
 		return nil
 	}
-	v := m.visible(m.full)
+	v := m.inView(m.full)
 	same := len(v.Agents) == len(m.snap.Agents)
 	for i := 0; same && i < len(v.Agents); i++ {
 		same = v.Agents[i].Key == m.snap.Agents[i].Key
@@ -71,6 +72,7 @@ func (m *Model) toggleHideDone() tea.Cmd {
 // pane, or "".
 func (m *Model) cursorAt() (string, int) {
 	if !m.following() && m.view != nil {
+		m.clampView()
 		return m.view.file, m.view.ucur
 	}
 	m.prepare()
@@ -87,7 +89,7 @@ type editorDone struct{ err error }
 // Most terminal editors take +LINE. The editors that do not take it get
 // FILE:LINE.
 func editorArgs(editor, file string, line int) []string {
-	words := strings.Fields(editor)
+	words := config.SplitCommand(editor)
 	if len(words) == 0 {
 		words = []string{"vi"}
 	}
@@ -160,19 +162,22 @@ func (m *Model) histAt(ai int) int {
 // focused agent. A step past the newest event goes back to follow.
 func (m *Model) stepHistory(dir int) tea.Cmd {
 	fi := m.focusIndex()
-	if fi < 0 || len(m.snap.Agents[fi].Events) == 0 {
-		return nil
+	if fi < 0 {
+		return m.flashNote("there is no agent to step through", m.theme.Dim())
+	}
+	if len(m.snap.Agents[fi].Events) == 0 {
+		return m.flashNote(m.tag(fi)+" has no steps yet", m.theme.Dim())
 	}
 	n := len(m.snap.Agents[fi].Events)
 	j := m.histAt(fi)
 	var cmd tea.Cmd
 	switch {
 	case j < 0 && dir > 0:
-		return nil
+		return m.flashNote("there is no newer step", m.theme.Dim())
 	case j < 0:
 		j = n - 1
 		older, newer := m.keys.first(actHistPrev), m.keys.first(actHistNext)
-		cmd = m.flashNote("history of "+tag(fi)+" · "+older+" older · "+newer+" newer · esc back to follow", m.theme.Dim())
+		cmd = m.flashNote("history of "+m.tag(fi)+" · "+older+" older · "+newer+" newer · esc back to follow", m.theme.Dim())
 	default:
 		j += dir
 	}
@@ -267,7 +272,7 @@ func (m *Model) awaySummary(since time.Time) string {
 			what = append(what, "is done")
 		}
 		if len(what) > 0 {
-			parts = append(parts, tag(i)+" "+a.Name+" "+strings.Join(what, " and "))
+			parts = append(parts, m.tag(i)+" "+a.Name+" "+strings.Join(what, " and "))
 		}
 	}
 	if len(parts) == 0 {

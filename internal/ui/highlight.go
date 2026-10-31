@@ -21,6 +21,7 @@ type highlighted struct {
 	version int
 	lang    string
 	lines   [][]span
+	plain   bool // the text has no colors yet, because the highlight runs
 }
 
 const maxHighlight = 1 << 20
@@ -37,7 +38,8 @@ func lexerFor(path string, text string) chroma.Lexer {
 	return l
 }
 
-// highlight splits each line into colored spans. It expands tabs.
+// highlight splits each line into colored spans. The spans keep the tabs.
+// It runs in a goroutine, so it does not use the state of the UI.
 func highlight(path string, lines []string) ([][]span, string) {
 	text := strings.Join(lines, "\n")
 	out := make([][]span, len(lines))
@@ -47,32 +49,23 @@ func highlight(path string, lines []string) ([][]span, string) {
 		lang = strings.ToLower(lexer.Config().Name)
 	}
 	if lexer == nil || len(text) > maxHighlight {
-		for i, l := range lines {
-			out[i] = []span{{text: expandTabs(l, 0), role: rFG}}
-		}
-		return out, lang
+		return plainSpans(lines), lang
 	}
 	it, err := chroma.Coalesce(lexer).Tokenise(nil, text)
 	if err != nil {
-		for i, l := range lines {
-			out[i] = []span{{text: expandTabs(l, 0), role: rFG}}
-		}
-		return out, lang
+		return plainSpans(lines), lang
 	}
-	row, col := 0, 0
+	row := 0
 	for tok := it(); tok != chroma.EOF; tok = it() {
 		r := roleOf(tok.Type)
 		parts := strings.Split(tok.Value, "\n")
 		for i, p := range parts {
 			if i > 0 {
 				row++
-				col = 0
 			}
 			if p == "" || row >= len(out) {
 				continue
 			}
-			p = expandTabs(p, col)
-			col += width(p)
 			out[row] = append(out[row], span{text: p, role: r})
 		}
 	}
@@ -147,37 +140,56 @@ func isIdent(s string) bool {
 	return true
 }
 
-// expandTabs replaces tabs with spaces to the next tab stop. col is the
-// column where s starts.
+// plainSpans makes one span without color for each line.
+func plainSpans(lines []string) [][]span {
+	out := make([][]span, len(lines))
+	for i, l := range lines {
+		out[i] = []span{{text: l, role: rFG}}
+	}
+	return out
+}
+
+// expandTabs replaces tabs with spaces to the next tab stop and removes
+// escape sequences. col is the column where s starts.
 func expandTabs(s string, col int) string {
-	if !strings.Contains(s, "\t") {
+	if plainText(s) && !strings.Contains(s, "\t") {
 		return s
 	}
 	var b strings.Builder
-	for _, r := range s {
-		if r == '\t' {
+	for len(s) > 0 {
+		seq, w, rest := next(s, nil)
+		s = rest
+		switch {
+		case seq == "\t":
 			n := tabWidth - col%tabWidth
 			b.WriteString(strings.Repeat(" ", n))
 			col += n
-			continue
+		case w > 0:
+			b.WriteString(seq)
+			col += w
 		}
-		b.WriteRune(r)
-		col += width(string(r))
 	}
 	return b.String()
 }
 
-// displayCol converts a rune offset in a raw line to a screen column.
-func displayCol(line string, n int) int {
+// lineCols returns the screen width of a line of a file, with each tab to
+// the next tab stop. The canvas measures the line the same way.
+func lineCols(line string) int {
+	ascii := true
+	for i := 0; i < len(line) && ascii; i++ {
+		ascii = line[i] >= 0x20 && line[i] < 0x7f
+	}
+	if ascii {
+		return len(line)
+	}
 	col := 0
-	for i, r := range []rune(line) {
-		if i >= n {
-			break
-		}
-		if r == '\t' {
+	for len(line) > 0 {
+		seq, w, rest := next(line, nil)
+		line = rest
+		if seq == "\t" {
 			col += tabWidth - col%tabWidth
 		} else {
-			col += width(string(r))
+			col += w
 		}
 	}
 	return col

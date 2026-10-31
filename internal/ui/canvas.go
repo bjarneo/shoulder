@@ -4,8 +4,15 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/mattn/go-runewidth"
+	uv "github.com/charmbracelet/ultraviolet"
+	xansi "github.com/charmbracelet/x/ansi"
 )
+
+// widthMethod is the way that the renderer of Bubble Tea measures text. It
+// is WcWidth until the terminal reports the grapheme mode 2027. The canvas,
+// width and clip measure text the same way, so that each row has the width
+// of the terminal. Only the UI goroutine reads and sets it.
+var widthMethod = xansi.WcWidth
 
 // Style is the look of one cell.
 type Style struct {
@@ -15,7 +22,7 @@ type Style struct {
 
 type cell struct {
 	s  string
-	w  uint8 // 0 for the second half of a wide character
+	w  uint8 // 0 for the other cells of a wide character
 	st Style
 }
 
@@ -35,56 +42,95 @@ func newCanvas(w, h int) *Canvas {
 
 func (c *Canvas) at(x, y int) *cell { return &c.cells[y*c.W+x] }
 
-// fill clears a rectangle and sets its background.
+// fill clears a rectangle and sets its background. A wide character that
+// the rectangle cuts at an edge becomes spaces.
 func (c *Canvas) fill(x, y, w, h int, bg Color) {
+	x0, x1 := max(0, x), min(c.W, x+w)
+	if x0 >= x1 {
+		return
+	}
 	for yy := max(0, y); yy < min(c.H, y+h); yy++ {
-		for xx := max(0, x); xx < min(c.W, x+w); xx++ {
+		c.clear(x0, yy)
+		c.clear(x1-1, yy)
+		for xx := x0; xx < x1; xx++ {
 			*c.at(xx, yy) = cell{s: " ", w: 1, st: Style{BG: bg}}
 		}
 	}
 }
 
-// clear makes cell x a plain space and repairs a wide character that it
-// cuts.
+// clear makes cell x a plain space. When cell x is a part of a wide
+// character, all cells of that character become spaces.
 func (c *Canvas) clear(x, y int) {
-	cl := c.at(x, y)
-	if cl.w == 0 && x > 0 {
-		p := c.at(x-1, y)
-		p.s, p.w = " ", 1
+	head := x
+	for head > 0 && c.at(head, y).w == 0 {
+		head--
 	}
-	if cl.w == 2 && x+1 < c.W {
-		n := c.at(x+1, y)
-		n.s, n.w = " ", 1
+	if c.at(head, y).w == 0 {
+		head = x
 	}
-	cl.s, cl.w = " ", 1
+	end := max(x+1, head+int(c.at(head, y).w))
+	for xx := head; xx < min(end, c.W); xx++ {
+		cl := c.at(xx, y)
+		cl.s, cl.w = " ", 1
+	}
 }
 
-// text writes s from column x and stops before column maxX. A style without
-// a background keeps the background of each cell. It returns the column after
-// the text.
+// next decodes the first escape sequence, control character or grapheme
+// cluster of s, the same way as the renderer. It returns the part, its width
+// in cells and the rest of s. The width is 0 for a sequence or a control
+// character. An 8-bit start of a sequence, such as U+009B, counts as its
+// 7-bit form, so that the full sequence goes away.
+func next(s string, p *xansi.Parser) (string, int, string) {
+	if len(s) >= 2 && s[0] == 0xc2 {
+		switch s[1] {
+		case 0x90, 0x98, 0x9b, 0x9d, 0x9e, 0x9f:
+			s = "\x1b" + string(rune(s[1]-0x40)) + s[2:]
+		}
+	}
+	seq, w, n, _ := widthMethod.DecodeSequenceInString(s, 0, p)
+	if n <= 0 {
+		return s[:1], 0, s[1:]
+	}
+	return seq, w, s[n:]
+}
+
+// text writes s from column x and stops before column maxX. A tab is one
+// space. A style without a background keeps the background of each cell. It
+// returns the column after the text.
 func (c *Canvas) text(x, y, maxX int, s string, st Style) int {
+	return c.write(x, y, maxX, -1, s, st)
+}
+
+// tabbed writes s like text, but a tab goes to the next tab stop. The tab
+// stops start at column origin.
+func (c *Canvas) tabbed(x, y, maxX, origin int, s string, st Style) int {
+	return c.write(x, y, maxX, origin, s, st)
+}
+
+// write writes s with the tab stops from origin, or with a tab as one space
+// when origin is negative. It removes escape sequences and control
+// characters.
+func (c *Canvas) write(x, y, maxX, origin int, s string, st Style) int {
 	if y < 0 || y >= c.H {
 		return x
 	}
 	maxX = min(maxX, c.W)
-	for _, r := range s {
-		if x >= maxX {
-			break
-		}
-		if r == '\t' || r == '\n' || r == '\r' {
-			r = ' '
-		}
-		if r < 0x20 || r == 0x7f {
-			continue
-		}
-		w := runewidth.RuneWidth(r)
+	for len(s) > 0 && x < maxX {
+		seq, w, rest := next(s, nil)
+		s = rest
 		if w == 0 {
-			if x > 0 {
-				p := c.at(x-1, y)
-				if p.w == 0 && x > 1 {
-					p = c.at(x-2, y)
+			switch seq {
+			case "\t":
+				stop := x + 1
+				if origin >= 0 && x >= origin {
+					stop = x + tabWidth - (x-origin)%tabWidth
 				}
-				p.s += string(r)
+				for ; x < min(stop, maxX); x++ {
+					c.put(x, y, " ", 1, st)
+				}
+			case "\n", "\r":
+				c.put(x, y, " ", 1, st)
+				x++
 			}
 			continue
 		}
@@ -94,28 +140,29 @@ func (c *Canvas) text(x, y, maxX int, s string, st Style) int {
 			}
 			break
 		}
-		c.put(x, y, string(r), uint8(w), st)
-		if w == 2 {
-			c.put(x+1, y, "", 0, st)
-		}
+		c.put(x, y, seq, w, st)
 		x += w
 	}
 	return x
 }
 
-func (c *Canvas) put(x, y int, s string, w uint8, st Style) {
-	if x < 0 || x >= c.W {
+// put writes one character of w cells at column x.
+func (c *Canvas) put(x, y int, s string, w int, st Style) {
+	w = max(1, w)
+	if x < 0 || x+w > c.W || y < 0 || y >= c.H {
 		return
 	}
-	cl := c.at(x, y)
-	bg := cl.st.BG
-	if w != 0 {
-		c.clear(x, y)
+	bg := c.at(x, y).st.BG
+	for xx := x; xx < x+w; xx++ {
+		c.clear(xx, y)
 	}
 	if st.BG == none {
 		st.BG = bg
 	}
-	*cl = cell{s: s, w: w, st: st}
+	*c.at(x, y) = cell{s: s, w: uint8(w), st: st}
+	for xx := x + 1; xx < x+w; xx++ {
+		*c.at(xx, y) = cell{st: st}
+	}
 }
 
 // paint changes the style of cells without changing their text.
@@ -205,7 +252,7 @@ func appendColor(b []byte, c Color, bg bool) []byte {
 }
 
 // width returns the display width of s.
-func width(s string) int { return runewidth.StringWidth(s) }
+func width(s string) int { return widthMethod.StringWidth(s) }
 
 // clip shortens s to w columns and marks the cut with an ellipsis.
 func clip(s string, w int) string {
@@ -215,7 +262,33 @@ func clip(s string, w int) string {
 	if width(s) <= w {
 		return s
 	}
-	return runewidth.Truncate(s, w, "…")
+	return widthMethod.Truncate(s, w, "…")
+}
+
+// clipLeft shortens s to w columns from the start and marks the cut with an
+// ellipsis. The end of s, such as the name of a file, stays.
+func clipLeft(s string, w int) string {
+	if w <= 0 {
+		return ""
+	}
+	if width(s) <= w {
+		return s
+	}
+	var parts []string
+	var ws []int
+	for len(s) > 0 {
+		seq, cw, rest := next(s, nil)
+		s = rest
+		if cw > 0 {
+			parts, ws = append(parts, seq), append(ws, cw)
+		}
+	}
+	room, i := w-width("…"), len(parts)
+	for i > 0 && ws[i-1] <= room {
+		i--
+		room -= ws[i]
+	}
+	return "…" + strings.Join(parts[i:], "")
 }
 
 // padLeft right-aligns s in w columns.
@@ -240,7 +313,11 @@ func wrap(s string, w int) []string {
 					out = append(out, line)
 					line = ""
 				}
-				cut := runewidth.Truncate(word, w, "")
+				cut := widthMethod.Truncate(word, w, "")
+				if cut == "" {
+					// One character is wider than the line. It gets its own line.
+					cut, _, _ = next(word, nil)
+				}
 				out = append(out, cut)
 				word = word[len(cut):]
 			}
@@ -256,5 +333,73 @@ func wrap(s string, w int) []string {
 		}
 		out = append(out, line)
 	}
+	return out
+}
+
+// plainText reports whether s has no escape sequences and no control
+// characters other than tabs.
+func plainText(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if b := s[i]; (b < 0x20 && b != '\t') || b == 0x7f || b == 0xc2 {
+			return false
+		}
+	}
+	return true
+}
+
+// stripEsc removes the escape sequences and the control characters other
+// than tabs from s.
+func stripEsc(s string) string {
+	if plainText(s) {
+		return s
+	}
+	var b strings.Builder
+	for len(s) > 0 {
+		seq, w, rest := next(s, nil)
+		s = rest
+		if w > 0 || seq == "\t" {
+			b.WriteString(seq)
+		}
+	}
+	return b.String()
+}
+
+// seg is a part of a line of command output in one color.
+type seg struct {
+	text string
+	fg   Color // none for the default color of the line
+	bold bool
+}
+
+// sgrSegs splits a line of command output at its SGR sequences. The parts
+// keep the foreground color and the bold text of the sequences. All other
+// escape sequences and control characters go away.
+func sgrSegs(s string) []seg {
+	if plainText(s) {
+		return []seg{{text: s}}
+	}
+	p := xansi.GetParser()
+	defer xansi.PutParser(p)
+	var out []seg
+	var pen uv.Style
+	var b strings.Builder
+	flush := func() {
+		if b.Len() > 0 {
+			out = append(out, seg{text: b.String(), fg: colorOf(pen.Fg), bold: pen.Attrs&uv.AttrBold != 0})
+			b.Reset()
+		}
+	}
+	for len(s) > 0 {
+		seq, w, rest := next(s, p)
+		s = rest
+		switch {
+		case w > 0 || seq == "\t":
+			b.WriteString(seq)
+		case xansi.HasCsiPrefix(seq) && p.Command() == 'm':
+			flush()
+			uv.ReadStyle(p.Params(), &pen)
+		}
+	}
+	flush()
 	return out
 }

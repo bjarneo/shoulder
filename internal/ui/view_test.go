@@ -186,7 +186,7 @@ func editBy(m *Model, i int, path string) watch.Snapshot {
 func TestAutoFocusJumpsToEdits(t *testing.T) {
 	m, dir := fixture(t)
 	main, lim := filepath.Join(dir, "main.go"), filepath.Join(dir, "internal/limit/limit.go")
-	focus := func() string { return tag(m.focusIndex()) }
+	focus := func() string { return m.tag(m.focusIndex()) }
 	if focus() != "A1" {
 		t.Fatalf("start focus: %s, want the agent with the newest edit", focus())
 	}
@@ -241,7 +241,7 @@ func TestAutoFocusLeavesFinishedAgent(t *testing.T) {
 	m.focusKey = m.snap.Agents[2].Key
 	m.lastJump = time.Time{}
 	m.Update(tickMsg{})
-	if got := tag(m.focusIndex()); got != "A1" {
+	if got := m.tag(m.focusIndex()); got != "A1" {
 		t.Fatalf("focus stayed on a finished agent: %s", got)
 	}
 }

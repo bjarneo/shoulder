@@ -70,7 +70,7 @@ func TestShellEditMovesFocus(t *testing.T) {
 		t.Fatal(err)
 	}
 	m.Update(repoMsg(r.Refresh()))
-	if got := tag(m.focusIndex()); got != "A2" {
+	if got := m.tag(m.focusIndex()); got != "A2" {
 		t.Fatalf("focus: got %s, want A2", got)
 	}
 	m.prepare()
@@ -97,7 +97,7 @@ func TestEditToolIsNotAShellEdit(t *testing.T) {
 	if len(m.shell) != 0 {
 		t.Fatalf("an edit tool call counts as a shell edit: %+v", m.shell)
 	}
-	if got := tag(m.focusIndex()); got != "A1" {
+	if got := m.tag(m.focusIndex()); got != "A1" {
 		t.Fatalf("focus: got %s, want A1", got)
 	}
 }
@@ -112,7 +112,7 @@ func TestFocusGoesToWaitingAgent(t *testing.T) {
 	a.Updated = time.Now()
 	agents[1] = a
 	m.Update(Snapshot(watch.Snapshot{Agents: agents}))
-	if got := tag(m.focusIndex()); got != "A2" {
+	if got := m.tag(m.focusIndex()); got != "A2" {
 		t.Fatalf("focus: got %s, want A2", got)
 	}
 	if m.msg.text != "→ A2 codex asks you" {

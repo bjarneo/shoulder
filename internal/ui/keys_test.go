@@ -55,7 +55,7 @@ func TestKeymapDefaults(t *testing.T) {
 	}
 	// The sidebar keeps the labels of the design.
 	want := [][2]string{
-		{"1-9 tab", "pin agent"}, {"a", "auto focus"}, {"f esc", "free scroll / follow"},
+		{"1-9 tab", "pin A1-A9 / next"}, {"a", "auto focus"}, {"f esc", "free scroll / follow"},
 		{"j k gg G", "move"}, {"]c [c", "next / prev hunk"}, {"H L", "prev / next buffer"},
 		{"s", "split per agent"}, {"?", "all keys"},
 	}

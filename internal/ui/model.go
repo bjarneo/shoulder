@@ -2,15 +2,16 @@
 package ui
 
 import (
+	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 	uv "github.com/charmbracelet/ultraviolet"
+	xansi "github.com/charmbracelet/x/ansi"
 
 	"github.com/bjarneo/shoulder/internal/repo"
 	"github.com/bjarneo/shoulder/internal/watch"
@@ -71,10 +72,13 @@ type Model struct {
 	edits    map[string][2]int
 	rows     map[string]*rowCache
 	hl       map[string]*highlighted
+	hlBusy   map[string]int // the files with a highlight that runs, and its version
+	nums     map[string]int // the number of the tag of each agent, by agent key
 	seen     map[string]time.Time
 	running  map[string]bool
 	runEnd   map[string]time.Time // when the result of a command showed up
 	mtimes   map[string]time.Time // the changed files and their times on disk
+	warm     map[string]bool      // the changed files that scanChanges loaded
 	shell    map[string]shellEdit // by agent key
 	waiting  map[string]bool      // agents that wait for the user
 	tabs     []string
@@ -149,6 +153,14 @@ type (
 	repoAgain struct{}
 )
 
+// hlMsg is the result of the syntax highlight of one version of a file.
+type hlMsg struct {
+	path    string
+	version int
+	lang    string
+	lines   [][]span
+}
+
 // New creates the model. Run the watcher in the background and send its
 // snapshots with Snapshot.
 func New(r *repo.Repo, w *watch.Watcher, opt Options) *Model {
@@ -161,6 +173,7 @@ func New(r *repo.Repo, w *watch.Watcher, opt Options) *Model {
 		follow: true, auto: true, all: opt.All, hideDone: opt.HideDone, splits: opt.Splits, inline: !opt.Signs,
 		ftop: map[string]ftop{}, sweeps: map[string]*sweep{}, lastRead: map[string]string{},
 		edits: map[string][2]int{}, rows: map[string]*rowCache{}, hl: map[string]*highlighted{},
+		hlBusy: map[string]int{}, nums: map[string]int{},
 		seen: map[string]time.Time{}, running: map[string]bool{}, runEnd: map[string]time.Time{},
 		shell: map[string]shellEdit{}, waiting: map[string]bool{},
 		msg: note{text: "reading agent sessions in " + r.Root + " …"},
@@ -196,9 +209,30 @@ func (m *Model) refreshRepo() tea.Cmd {
 }
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	model, cmd := m.update(msg)
+	if hc := m.highlightCmds(); hc != nil {
+		cmd = tea.Batch(cmd, hc)
+	}
+	return model, cmd
+}
+
+func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.w, m.h = msg.Width, msg.Height
+	case tea.ModeReportMsg:
+		// Bubble Tea measures text by grapheme clusters when the terminal
+		// has mode 2027. The canvas must measure text the same way.
+		if msg.Mode == xansi.ModeUnicodeCore && (msg.Value == xansi.ModeReset || msg.Value == xansi.ModeSet || msg.Value == xansi.ModePermanentlySet) {
+			widthMethod = xansi.GraphemeWidth
+		}
+	case hlMsg:
+		delete(m.hlBusy, msg.path)
+		// A result for an old version of the file goes away. The next
+		// update starts the highlight of the new version.
+		if f := m.repo.File(msg.path); f.Version == msg.version {
+			m.hl[msg.path] = &highlighted{version: msg.version, lang: msg.lang, lines: msg.lines}
+		}
 	case tea.KeyPressMsg:
 		return m, m.key(msg.String())
 	case tea.MouseClickMsg:
@@ -213,9 +247,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.MouseWheelMsg:
 		switch msg.Button {
 		case tea.MouseWheelUp:
-			m.moveU(-3)
+			return m, m.moveU(-3)
 		case tea.MouseWheelDown:
-			m.moveU(3)
+			return m, m.moveU(3)
 		}
 	case snapMsg:
 		return m, m.apply(watch.Snapshot(msg))
@@ -271,7 +305,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // apply takes a new snapshot from the watcher.
 func (m *Model) apply(s watch.Snapshot) tea.Cmd {
 	m.full = s
-	s = m.visible(s)
+	m.number(s)
+	s = m.inView(s)
 	first := !m.loaded
 	m.loaded = true
 	m.now = time.Now()
@@ -291,9 +326,9 @@ func (m *Model) apply(s watch.Snapshot) tea.Cmd {
 	newest, newestAt, newestFile := -1, time.Time{}, ""
 	for i := range s.Agents {
 		a := &s.Agents[i]
-		label := tag(i) + " " + a.Name
+		label := m.tag(i) + " " + a.Name
 		if !first && !old[a.Key] && m.now.Sub(a.Updated) < recentFor {
-			m.msg = note{label + " started · " + a.Task(), m.theme.Agent(i)}
+			m.msg = note{label + " started · " + a.Task(), m.color(i)}
 		}
 		for j := range a.Events {
 			e := &a.Events[j]
@@ -324,9 +359,9 @@ func (m *Model) apply(s watch.Snapshot) tea.Cmd {
 			if !first && m.now.Sub(e.Time) < recentFor {
 				switch e.Kind {
 				case watch.KindDone:
-					m.msg = note{label + " done · " + e.Text, m.theme.Agent(i)}
+					m.msg = note{label + " done · " + e.Text, m.color(i)}
 				case watch.KindAsk:
-					m.msg = note{label + " asks you · " + e.Text, m.theme.Agent(i)}
+					m.msg = note{label + " asks you · " + e.Text, m.color(i)}
 				case watch.KindEdit:
 					if e.File != "" && m.inScope(e.File) && e.Time.After(newestAt) {
 						newest, newestAt, newestFile = i, e.Time, e.File
@@ -368,13 +403,79 @@ func (m *Model) apply(s watch.Snapshot) tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
+// number gives each agent of a snapshot of the watcher a number for its tag
+// and its color, the first time that the UI sees the agent. The agent keeps
+// the number while it is in the snapshots, also when it does not show. An
+// agent that is not in the snapshot frees its number, and a new agent takes
+// the smallest free number. Thus the tags of the agents do not move, and
+// the keys 1 … 9 stay useful in a long session.
+func (m *Model) number(s watch.Snapshot) {
+	in := map[string]bool{}
+	for i := range s.Agents {
+		in[s.Agents[i].Key] = true
+	}
+	used := map[int]bool{}
+	for k, n := range m.nums {
+		if in[k] {
+			used[n] = true
+		} else {
+			delete(m.nums, k)
+		}
+	}
+	n := 1
+	for i := range s.Agents {
+		if _, ok := m.nums[s.Agents[i].Key]; ok {
+			continue
+		}
+		for used[n] {
+			n++
+		}
+		m.nums[s.Agents[i].Key], used[n] = n, true
+	}
+}
+
+// inView returns the agents that show, in the order of their tags.
+func (m *Model) inView(s watch.Snapshot) watch.Snapshot {
+	s = m.visible(s)
+	s.Agents = append([]watch.Agent(nil), s.Agents...)
+	sort.SliceStable(s.Agents, func(i, j int) bool { return m.nums[s.Agents[i].Key] < m.nums[s.Agents[j].Key] })
+	return s
+}
+
+// num returns the tag number of agent i in view.
+func (m *Model) num(i int) int {
+	if i < 0 || i >= len(m.snap.Agents) {
+		return 0
+	}
+	if n, ok := m.nums[m.snap.Agents[i].Key]; ok {
+		return n
+	}
+	return i + 1
+}
+
+// tag returns the tag of agent i in view, such as A1.
+func (m *Model) tag(i int) string { return tagText(m.num(i)) }
+
+// color returns the color of agent i in view.
+func (m *Model) color(i int) Color { return m.theme.Agent(max(0, m.num(i)-1)) }
+
+// byNum returns the agent in view with tag number n, or -1.
+func (m *Model) byNum(n int) int {
+	for i := range m.snap.Agents {
+		if m.num(i) == n {
+			return i
+		}
+	}
+	return -1
+}
+
 func (m *Model) welcome() note {
 	n := len(m.snap.Agents)
 	if n == 0 {
 		if m.all {
 			return note{"no agent sessions in the last " + durText(m.opt.Since), m.theme.Dim()}
 		}
-		return note{"no agent sessions in " + m.repo.Root + " in the last " + durText(m.opt.Since) + " · start claude, codex, gemini or opencode here", m.theme.Dim()}
+		return note{"no agent sessions in " + m.repo.Root + " in the last " + durText(m.opt.Since) + " · start claude, codex, gemini, opencode or omp here", m.theme.Dim()}
 	}
 	where := ""
 	if m.repo.State.Branch != "" {
@@ -527,6 +628,11 @@ type shellEdit struct {
 // maxScan is the largest number of changed files that scanChanges checks.
 const maxScan = 200
 
+// warmPerScan is the number of changed files that one scan loads. A loaded
+// file keeps its lines, so that a later shell edit shows the changed line.
+// A small number keeps each scan fast in a large change set.
+const warmPerScan = 4
+
 // scanChanges looks for changed files in git that changed on disk since the
 // last scan. A change that no edit tool call explains goes to the agent that
 // ran a command at that time, so that the view follows edits through the
@@ -534,31 +640,42 @@ const maxScan = 200
 func (m *Model) scanChanges() {
 	first := m.mtimes == nil
 	if first {
-		m.mtimes = map[string]time.Time{}
+		m.mtimes, m.warm = map[string]time.Time{}, map[string]bool{}
 	}
 	if len(m.repo.State.Changes) > maxScan {
 		return
 	}
+	now := time.Now()
+	budget := warmPerScan
 	for rel, c := range m.repo.State.Changes {
 		if c.Code == 'D' {
 			continue
 		}
+		// The time on disk comes from os.Stat, because a load reads the
+		// file and its old version.
 		p := filepath.Join(m.repo.Root, filepath.FromSlash(rel))
-		seen := time.Now()
-		f := m.repo.File(p)
-		at := f.ModTime()
-		if f.Missing || at.IsZero() {
+		st, err := os.Stat(p)
+		if err != nil || st.IsDir() {
 			continue
 		}
+		at := st.ModTime()
 		prev, known := m.mtimes[p]
 		m.mtimes[p] = at
-		if first || (known && !at.After(prev)) || seen.Sub(at) > recentFor {
+		if first || (known && !at.After(prev)) || now.Sub(at) > recentFor {
+			if !m.warm[p] && budget > 0 {
+				m.repo.File(p)
+				m.warm[p] = true
+				budget--
+			}
 			continue
 		}
 		// A command that changes more files ends at the newest change.
 		if i := m.shellAgent(p, at); i >= 0 {
 			key := m.snap.Agents[i].Key
 			if old, ok := m.shell[key]; !ok || at.After(old.at) {
+				seen := time.Now()
+				m.repo.File(p)
+				m.warm[p] = true
 				m.shell[key] = shellEdit{file: p, at: at, seen: seen}
 				m.want = &jumpTo{key: key, why: "edits " + m.rel(p)}
 			}
@@ -635,13 +752,29 @@ func (m *Model) shellPos(i int) (pos, bool) {
 	}
 	line = min(line, len(f.Lines)-1)
 	t := f.Lines[line].Text
-	return pos{ok: true, file: se.file, line: line, col: displayCol(t, utf8.RuneCountInString(t)), readFrom: -1, editing: m.acts[i].Act == "running"}, true
+	return pos{ok: true, file: se.file, line: line, col: lineCols(t), readFrom: -1, editing: m.acts[i].Act == "running"}, true
 }
 
 func (m *Model) jump(i int, why string) {
 	m.focusKey = m.snap.Agents[i].Key
 	m.lastJump = time.Now()
-	m.msg = note{"→ " + tag(i) + " " + m.snap.Agents[i].Name + " " + why, m.theme.Agent(i)}
+	m.msg = note{"→ " + m.tag(i) + " " + m.snap.Agents[i].Name + " " + why, m.color(i)}
+}
+
+// pinTag pins the agent with tag number n. An agent that is done and
+// hidden shows again, because the focused agent always shows.
+func (m *Model) pinTag(n int) tea.Cmd {
+	if i := m.byNum(n); i >= 0 {
+		return m.pin(i)
+	}
+	for _, a := range m.full.Agents {
+		if m.nums[a.Key] == n {
+			m.focusKey = a.Key
+			cmd := m.apply(m.full)
+			return tea.Batch(cmd, m.pin(m.byNum(n)))
+		}
+	}
+	return m.flashNote("there is no agent "+tagText(n), m.theme.Dim())
 }
 
 // pin focuses an agent and turns auto focus off, so the focus stays there.
@@ -654,7 +787,7 @@ func (m *Model) pin(i int) tea.Cmd {
 		return nil
 	}
 	m.auto, m.want = false, nil
-	text := tag(i) + " is pinned"
+	text := m.tag(i) + " is pinned"
 	if k := m.keys.first(actAuto); k != "" {
 		text += " · " + k + " turns auto focus on again"
 	}
@@ -802,8 +935,7 @@ func (m *Model) position(i int) pos {
 	case watch.KindEdit:
 		_, end, _ := m.editRange(a, act.Cur, f)
 		p.line = end
-		t := f.Lines[end].Text
-		p.col = displayCol(t, utf8.RuneCountInString(t))
+		p.col = lineCols(f.Lines[end].Text)
 		p.editing = act.Act == "editing"
 	}
 	return p
@@ -922,6 +1054,8 @@ func (m *Model) rowsOf(f *repo.File) *rowCache {
 	return rc
 }
 
+// highlightOf returns the colored text of a file. Until the highlight of
+// this version arrives, the text has no colors.
 func (m *Model) highlightOf(f *repo.File) *highlighted {
 	h := m.hl[f.Path]
 	if h != nil && h.version == f.Version {
@@ -931,10 +1065,75 @@ func (m *Model) highlightOf(f *repo.File) *highlighted {
 	for i := range f.Lines {
 		lines[i] = f.Lines[i].Text
 	}
-	spans, lang := highlight(f.Path, lines)
-	h = &highlighted{version: f.Version, lang: lang, lines: spans}
-	m.hl[f.Path] = h
-	return h
+	p := &highlighted{version: f.Version, lines: plainSpans(lines), plain: true}
+	if h != nil {
+		p.lang = h.lang
+	}
+	m.hl[f.Path] = p
+	return p
+}
+
+// highlightCmds starts the highlight of the files that the code panes show,
+// in a command, for each new version of a file. One highlight of a file
+// runs at a time.
+func (m *Model) highlightCmds() tea.Cmd {
+	var cmds []tea.Cmd
+	for _, p := range m.shownFiles() {
+		f := m.repo.File(p)
+		if f.Missing || f.Binary || f.TooBig {
+			continue
+		}
+		if h := m.hl[p]; h != nil && h.version == f.Version && !h.plain {
+			continue
+		}
+		if _, busy := m.hlBusy[p]; busy {
+			continue
+		}
+		m.hlBusy[p] = f.Version
+		lines := make([]string, len(f.Lines))
+		for i := range f.Lines {
+			lines[i] = stripEsc(f.Lines[i].Text)
+		}
+		version := f.Version
+		cmds = append(cmds, func() tea.Msg {
+			spans, lang := highlight(p, lines)
+			return hlMsg{path: p, version: version, lang: lang, lines: spans}
+		})
+	}
+	return tea.Batch(cmds...)
+}
+
+// shownFiles returns the files that the code panes show.
+func (m *Model) shownFiles() []string {
+	var out []string
+	add := func(p string) {
+		if p != "" && !contains(out, p) {
+			out = append(out, p)
+		}
+	}
+	at := func(i int) string {
+		if i >= 0 && i < len(m.poss) && m.poss[i].ok {
+			return m.poss[i].file
+		}
+		return ""
+	}
+	fi := m.focusIndex()
+	if m.splits && len(m.snap.Agents) > 0 {
+		for _, i := range m.splitAgents() {
+			if i == fi && !m.following() {
+				add(m.view.file)
+			} else {
+				add(at(i))
+			}
+		}
+		return out
+	}
+	if m.following() {
+		add(at(fi))
+	} else {
+		add(m.view.file)
+	}
+	return out
 }
 
 // buildTabs lists the buffers: files that agents edited and the files that
@@ -1010,7 +1209,7 @@ func (m *Model) buildFiles() {
 		inside := m.repo.Inside(p)
 		dir := filepath.Dir(rel)
 		if dir != "." && dir != lastDir {
-			m.files = append(m.files, fileRow{dir: true, label: "▾ " + dir + "/"})
+			m.files = append(m.files, fileRow{dir: true, label: dir + "/"})
 		}
 		lastDir = dir
 		r := fileRow{path: p, label: filepath.Base(rel), inRepo: inside}
@@ -1043,17 +1242,17 @@ func (m *Model) flashNote(text string, c Color) tea.Cmd {
 // key handles one key press. A key that starts a longer sequence waits in
 // m.pending for the next key.
 func (m *Model) key(k string) tea.Cmd {
+	if k == "ctrl+c" {
+		return tea.Quit
+	}
 	if m.help {
 		if a := m.keys.seqs[k]; k == "esc" || a == actHelp || a == actQuit {
 			m.help = false
 		}
 		return nil
 	}
-	if k == "ctrl+c" {
-		return tea.Quit
-	}
 	if m.pending == "" && len(k) == 1 && k[0] >= '1' && k[0] <= '9' {
-		return m.pin(int(k[0] - '1'))
+		return m.pinTag(int(k[0] - '0'))
 	}
 	seq := k
 	if m.pending != "" {
@@ -1072,28 +1271,29 @@ func (m *Model) key(k string) tea.Cmd {
 // do runs an action.
 func (m *Model) do(a action) tea.Cmd {
 	n := len(m.snap.Agents)
+	m.clampView()
 	switch a {
 	case actPageDown:
-		m.moveU(m.codeRows() / 2)
+		return m.moveU(m.codeRows() / 2)
 	case actPageUp:
-		m.moveU(-m.codeRows() / 2)
-	case actAgentNext:
-		if n > 0 {
+		return m.moveU(-m.codeRows() / 2)
+	case actAgentNext, actAgentPrev:
+		if n == 0 {
+			return m.flashNote("there are no agents yet", m.theme.Dim())
+		}
+		if a == actAgentNext {
 			return m.pin((max(0, m.focusIndex()) + 1) % n)
 		}
-	case actAgentPrev:
-		if n > 0 {
-			return m.pin((max(0, m.focusIndex()) + n - 1) % n)
-		}
+		return m.pin((max(0, m.focusIndex()) + n - 1) % n)
 	case actAuto:
 		return m.toggleAuto()
 	case actAllProjects:
 		return m.toggleAll()
 	case actFollow:
-		if m.following() {
-			m.toNormal()
-		} else {
+		if !m.following() {
 			m.follow, m.hist = true, nil
+		} else if !m.toNormal() {
+			return m.noFile()
 		}
 	case actBack:
 		m.follow, m.hist = true, nil
@@ -1108,13 +1308,13 @@ func (m *Model) do(a action) tea.Cmd {
 	case actCopy:
 		return m.copyPath()
 	case actDown:
-		m.moveU(1)
+		return m.moveU(1)
 	case actUp:
-		m.moveU(-1)
+		return m.moveU(-1)
 	case actTop:
-		m.moveU(-1 << 30)
+		return m.moveU(-1 << 30)
 	case actBottom:
-		m.moveU(1 << 30)
+		return m.moveU(1 << 30)
 	case actHunkNext:
 		return m.hunk(1)
 	case actHunkPrev:
@@ -1126,13 +1326,18 @@ func (m *Model) do(a action) tea.Cmd {
 	case actSplits:
 		m.ftop = map[string]ftop{}
 		m.splits = !m.splits
+		if m.splits && n == 0 {
+			return m.flashNote("there are no agents to split yet", m.theme.Dim())
+		}
 	case actInlineDiff:
 		m.inline = !m.inline
-		if m.view != nil {
+		if !m.following() {
 			m.scrollTo(m.view, true)
 		}
 	case actReload:
-		m.watcher.Reload()
+		if m.watcher != nil {
+			m.watcher.Reload()
+		}
 		m.follow = true
 		return m.flashNote("reading all sessions again", m.theme.Dim())
 	case actHelp:
@@ -1153,10 +1358,11 @@ func (m *Model) termRows(h int) int {
 	return min(11, max(3, h/4))
 }
 
-// toNormal leaves follow mode at the position of the focused agent.
-func (m *Model) toNormal() {
+// toNormal leaves follow mode at the position of the focused agent. It
+// reports false when there is no file to show.
+func (m *Model) toNormal() bool {
 	if !m.following() {
-		return
+		return true
 	}
 	m.prepare()
 	fi := m.focusIndex()
@@ -1167,11 +1373,11 @@ func (m *Model) toNormal() {
 		file = m.tabs[0]
 	}
 	if file == "" {
-		return
+		return false
 	}
 	key := "main"
-	if m.splits {
-		key = "p" + strconv.Itoa(fi)
+	if m.splits && fi >= 0 {
+		key = "p" + m.snap.Agents[fi].Key
 	}
 	top := 0
 	if ft, ok := m.ftop[key]; ok && ft.file == file {
@@ -1179,6 +1385,26 @@ func (m *Model) toNormal() {
 	}
 	m.view = &freeView{file: file, top: top, ucur: line}
 	m.follow = false
+	return true
+}
+
+// noFile tells that a key has no file to move in.
+func (m *Model) noFile() tea.Cmd {
+	return m.flashNote("there is no file to scroll", m.theme.Dim())
+}
+
+// clampView keeps the cursor and the scroll position of the free view in
+// its file, when the file gets shorter.
+func (m *Model) clampView() {
+	v := m.view
+	if v == nil {
+		return
+	}
+	f := m.repo.File(v.file)
+	if v.ucur < len(f.Lines) && v.top < len(m.rowsOf(f).rows) {
+		return
+	}
+	m.scrollTo(v, false)
 }
 
 func (m *Model) openFile(p string) {
@@ -1192,6 +1418,7 @@ func (m *Model) scrollTo(v *freeView, center bool) {
 		v.top, v.ucur = 0, 0
 		return
 	}
+	v.ucur = min(max(0, v.ucur), len(f.Lines)-1)
 	rc := m.rowsOf(f)
 	r, R := rc.at[v.ucur], m.codeRows()
 	switch {
@@ -1204,23 +1431,22 @@ func (m *Model) scrollTo(v *freeView, center bool) {
 	}
 }
 
-func (m *Model) moveU(d int) {
-	m.toNormal()
-	v := m.view
-	if v == nil {
-		return
+func (m *Model) moveU(d int) tea.Cmd {
+	if !m.toNormal() {
+		return m.noFile()
 	}
+	v := m.view
 	f := m.repo.File(v.file)
 	v.ucur = max(0, min(len(f.Lines)-1, v.ucur+d))
 	m.scrollTo(v, false)
+	return nil
 }
 
 func (m *Model) hunk(dir int) tea.Cmd {
-	m.toNormal()
-	v := m.view
-	if v == nil {
-		return nil
+	if !m.toNormal() {
+		return m.noFile()
 	}
+	v := m.view
 	f := m.repo.File(v.file)
 	rel := m.repo.Rel(v.file)
 	t := -1
@@ -1269,7 +1495,7 @@ func (m *Model) curFile() string {
 
 func (m *Model) cycleBuf(d int) tea.Cmd {
 	if len(m.tabs) == 0 {
-		return nil
+		return m.flashNote("there are no buffers yet", m.theme.Dim())
 	}
 	m.prepare()
 	i := -1
@@ -1286,7 +1512,7 @@ func (m *Model) cycleBuf(d int) tea.Cmd {
 	return nil
 }
 
-func tag(i int) string { return "A" + strconv.Itoa(i+1) }
+func tagText(n int) string { return "A" + strconv.Itoa(n) }
 
 func plural(n int, w string) string {
 	if n == 1 {

@@ -34,6 +34,7 @@ func (m *Model) View() tea.View {
 		return v
 	}
 	m.prepare()
+	m.clampView()
 	m.zones = m.zones[:0]
 	c := newCanvas(m.w, m.h)
 	if m.w < 60 || m.h < 12 {
@@ -42,12 +43,15 @@ func (m *Model) View() tea.View {
 		return v
 	}
 	var fp paneInfo
-	if m.splits && len(m.snap.Agents) > 0 {
+	split := m.splits && len(m.snap.Agents) > 0
+	if split {
 		fp = m.drawSplits(c, 1, m.h-3)
 	} else {
 		fp = m.drawFollow(c, 1, m.h-3)
 	}
-	m.drawTabs(c, fp.file)
+	// Without the sidebar, the top bar shows the agents.
+	lw, _ := sidebarWidths(m.w)
+	m.drawTabs(c, fp.file, split || lw == 0)
 	m.drawStatus(c, m.h-2, fp)
 	m.drawMsg(c, m.h-1)
 	if m.help {
@@ -140,7 +144,30 @@ func (m *Model) stateColor(i int) Color {
 	case watch.Waiting:
 		return m.theme.Dim()
 	}
-	return m.theme.Agent(i)
+	return m.color(i)
+}
+
+// glyph returns the status glyph of agent i and its color.
+func (m *Model) glyph(i int) (string, Color) {
+	t := &m.theme
+	switch act := m.acts[i]; act.Status {
+	case watch.Done:
+		if act.Act == "idle" {
+			return "✓", t.Dim()
+		}
+		return "✓", t.Add()
+	case watch.Waiting:
+		return "○", t.Dim()
+	}
+	return "●", m.color(i)
+}
+
+// backKey is the key that goes back to follow mode, for hints.
+func (m *Model) backKey() string {
+	if k := m.keys.first(actBack); k != "" {
+		return k
+	}
+	return m.keys.first(actFollow)
 }
 
 // drawWinbar draws the title row of a code pane.
@@ -151,15 +178,21 @@ func (m *Model) drawWinbar(c *Canvas, x, y, w int, info paneInfo, ai int, fol, s
 		bg = defColor
 	}
 	c.fill(x, y, w, 1, bg)
-	state, stateC := "free · esc to follow", t.Dim()
-	if fol && ai >= 0 {
+	state, stateC := "", t.Dim()
+	switch {
+	case fol && ai >= 0:
 		state, stateC = m.actLabel(ai), m.stateColor(ai)
+	case !fol:
+		state = "free"
+		if k := m.backKey(); k != "" {
+			state += " · " + k + " to follow"
+		}
 	}
 	right := x + w - 1 - width(state)
 	c.text(right, y, x+w-1, state, Style{FG: stateC})
 	cx := x + 1
 	if ai >= 0 && (fol || split) {
-		cx = c.text(cx, y, right-1, tag(ai), Style{FG: t.Agent(ai), Bold: true}) + 1
+		cx = c.text(cx, y, right-1, m.tag(ai), Style{FG: m.color(ai), Bold: true}) + 1
 	}
 	if split && ai >= 0 {
 		cx = c.text(cx, y, right-1, m.snap.Agents[ai].Name, Style{FG: t.FG()}) + 1
@@ -179,7 +212,7 @@ func (m *Model) drawWinbar(c *Canvas, x, y, w int, info paneInfo, ai int, fol, s
 		if split {
 			fg = t.Dim()
 		}
-		c.text(cx, y, right-1, clip(crumbs, right-1-cx), Style{FG: fg})
+		c.text(cx, y, right-1, clipLeft(crumbs, right-1-cx), Style{FG: fg})
 	}
 }
 
@@ -266,7 +299,7 @@ func (m *Model) drawCode(c *Canvas, key string, ai int, fol bool, x, y, w, h int
 		if rw.line < 0 {
 			c.fill(x, yy, w, 1, t.LineDel())
 			c.text(x+5, yy, x+w, "▎", Style{FG: t.Del()})
-			c.text(x+7, yy, x+w, expandTabs(rw.ghost, 0), Style{FG: t.Ghost()})
+			c.tabbed(x+7, yy, x+w, x+7, rw.ghost, Style{FG: t.Ghost()})
 			continue
 		}
 		i := rw.line
@@ -298,7 +331,7 @@ func (m *Model) drawCode(c *Canvas, key string, ai int, fol bool, x, y, w, h int
 		var curs []int
 		var cursC []Color
 		for _, hh := range hs {
-			ac := t.Agent(hh.i)
+			ac := m.color(hh.i)
 			if hh.p.readFrom >= 0 && i >= hh.p.readFrom && i <= hh.p.line {
 				numC = ac
 			}
@@ -314,7 +347,7 @@ func (m *Model) drawCode(c *Canvas, key string, ai int, fol bool, x, y, w, h int
 			if virt != "" {
 				virt += "   "
 			}
-			virt += "● " + tag(hh.i) + " " + m.actLabel(hh.i)
+			virt += "● " + m.tag(hh.i) + " " + m.actLabel(hh.i)
 			virtC = ac
 		}
 		if bg != none {
@@ -325,7 +358,7 @@ func (m *Model) drawCode(c *Canvas, key string, ai int, fol bool, x, y, w, h int
 		tx, end := x+7, x+7
 		if i < len(hl.lines) {
 			for _, sp := range hl.lines[i] {
-				end = c.text(end, yy, x+w, sp.text, Style{FG: t.Syn(sp.role), Italic: sp.role == rCom})
+				end = c.tabbed(end, yy, x+w, tx, sp.text, Style{FG: t.Syn(sp.role), Italic: sp.role == rCom})
 			}
 		}
 		if virt != "" {
@@ -343,15 +376,19 @@ func (m *Model) drawCode(c *Canvas, key string, ai int, fol bool, x, y, w, h int
 	return info
 }
 
+// centered draws a message and a path in the middle of a pane. The path
+// loses its start when it is too long, so that the file name shows.
 func (m *Model) centered(c *Canvas, x, y, w, h int, lines []string) {
 	t := &m.theme
 	y0 := y + max(0, (h-len(lines))/2)
-	for i, l := range lines {
+	for i, l := range lines[:min(len(lines), max(0, h))] {
 		st := Style{FG: t.Dim()}
 		if i == 0 {
 			st = Style{FG: t.FG()}
+			l = clip(l, w-2)
+		} else {
+			l = clipLeft(l, w-2)
 		}
-		l = clip(l, w-2)
 		c.text(x+max(0, (w-width(l))/2), y0+i, x+w, l, st)
 	}
 }
@@ -365,9 +402,10 @@ func (m *Model) drawEmpty(c *Canvas, x, y, w, h, ai int, split bool) {
 	}
 	var lines []ln
 	if ai < 0 {
-		where, start := "shoulder watches "+m.repo.Root, "start claude, codex, gemini or opencode in this project"
+		watches := "shoulder watches "
+		where, start := watches+clipLeft(m.repo.Root, w-4-width(watches)), "start claude, codex, gemini, opencode or omp in this project"
 		if m.all {
-			where, start = "shoulder watches all projects", "start claude, codex, gemini or opencode in any project"
+			where, start = "shoulder watches all projects", "start claude, codex, gemini, opencode or omp in any project"
 		}
 		lines = []ln{
 			{"no agents yet", Style{FG: t.FG(), Bold: true}},
@@ -375,6 +413,13 @@ func (m *Model) drawEmpty(c *Canvas, x, y, w, h, ai int, split bool) {
 			{"", Style{}},
 			{start, Style{FG: t.Dim()}},
 			{"sessions from the last " + durText(m.opt.Since) + " show here", Style{FG: t.Faint()}},
+		}
+		if k := m.keys.first(actAllProjects); k != "" && !m.all {
+			text, st := "press "+k+" to watch the agents of all projects", Style{FG: t.Faint()}
+			if n := m.full.Elsewhere; n > 0 {
+				text, st = plural(n, "agent")+" in other projects · press "+k+" to watch them", Style{FG: t.Dim()}
+			}
+			lines = append(lines, ln{text, st})
 		}
 		if n := m.hidden(); n > 0 {
 			show := ""
@@ -389,7 +434,7 @@ func (m *Model) drawEmpty(c *Canvas, x, y, w, h, ai int, split bool) {
 	} else {
 		a := &m.snap.Agents[ai]
 		if !split {
-			lines = append(lines, ln{tag(ai) + " " + a.Name, Style{FG: t.Agent(ai), Bold: true}})
+			lines = append(lines, ln{m.tag(ai) + " " + a.Name, Style{FG: m.color(ai), Bold: true}})
 		}
 		lines = append(lines,
 			ln{m.actLabel(ai), Style{FG: t.FG()}},
@@ -398,7 +443,7 @@ func (m *Model) drawEmpty(c *Canvas, x, y, w, h, ai int, split bool) {
 		)
 	}
 	y0 := y + max(0, (h-len(lines))/2)
-	for i, l := range lines {
+	for i, l := range lines[:min(len(lines), max(0, h))] {
 		s := clip(l.s, w-4)
 		c.text(x+max(0, (w-width(s))/2), y0+i, x+w, s, l.st)
 	}
@@ -474,28 +519,19 @@ func (m *Model) drawSidebar(c *Canvas, x, y, w, h int) {
 func (m *Model) drawAgentRow(c *Canvas, x, y, w, i int) {
 	t := &m.theme
 	a, act := &m.snap.Agents[i], m.acts[i]
-	ac := t.Agent(i)
+	ac := m.color(i)
 	focused := i == m.focusIndex()
 	if focused {
 		c.fill(x, y, w, 2, t.Raised())
 		c.text(x, y, x+1, "▎", Style{FG: ac})
 		c.text(x, y+1, x+1, "▎", Style{FG: ac})
 	}
-	glyph, glyphC := "●", ac
-	switch act.Status {
-	case watch.Done:
-		glyph, glyphC = "✓", t.Add()
-		if act.Act == "idle" {
-			glyphC = t.Dim()
-		}
-	case watch.Waiting:
-		glyph, glyphC = "○", t.Dim()
-	}
+	glyph, glyphC := m.glyph(i)
 	label := act.Act
 	right := x + w - 1 - width(label)
 	c.text(right, y, x+w-1, label, Style{FG: m.stateColor(i)})
 	cx := c.text(x+1, y, right, glyph, Style{FG: glyphC}) + 1
-	cx = c.text(cx, y, right, tag(i), Style{FG: ac, Bold: true}) + 1
+	cx = c.text(cx, y, right, m.tag(i), Style{FG: ac, Bold: true}) + 1
 	cx = c.text(cx, y, right-1, clip(a.Name, right-1-cx), Style{FG: t.FG()}) + 1
 	// The task tells apart agents of the same type. An agent in another
 	// project shows the project first.
@@ -544,7 +580,7 @@ func (m *Model) drawFiles(c *Canvas, x, y, w, h int) {
 	for k, f := range rows {
 		yy := y + k
 		if f.dir {
-			c.text(x+1, yy, x+w-1, clip(f.label, w-2), Style{FG: t.Dim()})
+			c.text(x+1, yy, x+w-1, "▾ "+clipLeft(f.label, w-4), Style{FG: t.Dim()})
 			continue
 		}
 		if f.path == cur {
@@ -573,7 +609,7 @@ func (m *Model) drawFiles(c *Canvas, x, y, w, h int) {
 		dx := addX - 1
 		for i := len(m.snap.Agents) - 1; i >= 0; i-- {
 			if m.acts[i].Status != watch.Done && m.poss[i].ok && m.poss[i].file == f.path && dx > x+8 {
-				c.text(dx, yy, dx+1, "●", Style{FG: t.Agent(i)})
+				c.text(dx, yy, dx+1, "●", Style{FG: m.color(i)})
 				dx--
 			}
 		}
@@ -600,6 +636,7 @@ type termLine struct {
 	pre  string
 	text string
 	c    Color
+	out  bool // a line of command output, with its escape sequences
 }
 
 func (m *Model) drawTerminal(c *Canvas, x, y, w, h, ai int) {
@@ -608,7 +645,7 @@ func (m *Model) drawTerminal(c *Canvas, x, y, w, h, ai int) {
 	cx := c.text(x+1, y, x+w, "TERMINAL", Style{FG: t.Dim(), Bold: true}) + 1
 	where := m.repo.Name
 	if ai >= 0 {
-		cx = c.text(cx, y, x+w, tag(ai), Style{FG: t.Agent(ai), Bold: true}) + 1
+		cx = c.text(cx, y, x+w, m.tag(ai), Style{FG: m.color(ai), Bold: true}) + 1
 		where = m.project(ai)
 	}
 	c.text(cx, y, x+w, "~/"+where, Style{FG: t.Dim()})
@@ -635,7 +672,7 @@ func (m *Model) drawTerminal(c *Canvas, x, y, w, h, ai int) {
 	if len(lines) == 0 {
 		msg := "no agent selected"
 		if ai >= 0 {
-			msg = tag(ai) + " has not run a command yet"
+			msg = m.tag(ai) + " has not run a command yet"
 		}
 		lines = []termLine{{text: msg, c: t.Faint()}}
 	}
@@ -644,8 +681,27 @@ func (m *Model) drawTerminal(c *Canvas, x, y, w, h, ai int) {
 	}
 	yy := y + h - len(lines)
 	for _, l := range lines {
-		cx := c.text(x+1, yy, x+w-1, l.pre, Style{FG: t.Agent(max(0, ai))})
-		c.text(cx, yy, x+w-1, l.text, Style{FG: l.c})
+		cx := c.text(x+1, yy, x+w-1, l.pre, Style{FG: m.color(ai)})
+		if !l.out {
+			c.tabbed(cx, yy, x+w-1, cx, l.text, Style{FG: l.c})
+			yy++
+			continue
+		}
+		// Command output keeps the colors of its SGR sequences. The text
+		// without a color takes the color of the line.
+		segs := sgrSegs(l.text)
+		var plain strings.Builder
+		for _, sg := range segs {
+			plain.WriteString(sg.text)
+		}
+		lc := m.cls(plain.String())
+		for _, sg := range segs {
+			fg := sg.fg
+			if fg == none {
+				fg = lc
+			}
+			cx = c.tabbed(cx, yy, x+w-1, x+1, sg.text, Style{FG: fg, Bold: sg.bold})
+		}
 		yy++
 	}
 }
@@ -670,13 +726,13 @@ func (m *Model) termLines(ai, upto, sel int) ([]termLine, int) {
 		cmd := strings.Split(e.Cmd, "\n")
 		out = append(out, termLine{pre: prompt, text: cmd[0], c: t.FG()})
 		for _, l := range cmd[1:min(len(cmd), 1+cmdPreview)] {
-			out = append(out, termLine{pre: "> ", text: expandTabs(l, 0), c: t.Dim()})
+			out = append(out, termLine{pre: "> ", text: l, c: t.Dim()})
 		}
 		if more := len(cmd) - 1 - cmdPreview; more > 0 {
 			out = append(out, termLine{pre: "> ", text: "… " + plural(more, "more line"), c: t.Faint()})
 		}
 		for _, l := range e.Output {
-			out = append(out, termLine{text: expandTabs(l, 0), c: m.cls(l)})
+			out = append(out, termLine{text: l, out: true})
 		}
 		if len(out) > 200 {
 			drop := len(out) - 200
@@ -687,7 +743,7 @@ func (m *Model) termLines(ai, upto, sel int) ([]termLine, int) {
 		}
 	}
 	if upto >= len(a.Events) && len(a.Events) > 0 && m.acts[ai].Act == "running" {
-		out = append(out, termLine{text: "█", c: t.Agent(ai)})
+		out = append(out, termLine{text: "█", c: m.color(ai)})
 	}
 	return out, start
 }
@@ -695,7 +751,7 @@ func (m *Model) termLines(ai, upto, sel int) ([]termLine, int) {
 // cls colors a line of command output.
 func (m *Model) cls(s string) Color {
 	t := &m.theme
-	l := strings.TrimSpace(s)
+	l := strings.TrimSpace(stripEsc(s))
 	switch {
 	case strings.HasPrefix(l, "✖") || strings.Contains(l, "FAILED") || strings.Contains(l, "panicked") || strings.HasPrefix(l, "error") ||
 		strings.HasPrefix(l, "FAIL") || strings.HasPrefix(l, "--- FAIL") || strings.Contains(l, "assertion failed"):
@@ -781,7 +837,7 @@ func (m *Model) logEntry(ai int, e *watch.Event) logEntry {
 	case watch.KindAsk:
 		le.kind, le.kc, le.text, le.tc = "wait", t.Dim(), "on you · "+e.Text, t.Dim()
 	case watch.KindYou:
-		le.kc, le.text = t.Agent(ai), e.Text
+		le.kc, le.text = m.color(ai), e.Text
 	case watch.KindSay:
 		le.kind, le.kc, le.text, le.tc = "", t.Dim(), e.Text, t.Dim()
 	case watch.KindDone:
@@ -792,6 +848,7 @@ func (m *Model) logEntry(ai int, e *watch.Event) logEntry {
 	if e.Kind != watch.KindRun && e.Result == watch.Failed {
 		le.tc = t.Del()
 	}
+	le.text = stripEsc(le.text)
 	return le
 }
 
@@ -803,7 +860,7 @@ func (m *Model) drawActivity(c *Canvas, x, y, w, h, ai int) {
 		return
 	}
 	a := &m.snap.Agents[ai]
-	cx = c.text(cx, y, x+w, tag(ai), Style{FG: t.Agent(ai), Bold: true}) + 1
+	cx = c.text(cx, y, x+w, m.tag(ai), Style{FG: m.color(ai), Bold: true}) + 1
 	name := a.Name + " · " + a.Source
 	if a.Name == a.Source {
 		name = a.Name
@@ -866,7 +923,7 @@ func (m *Model) drawActivity(c *Canvas, x, y, w, h, ai int) {
 		}
 		if j == sel {
 			c.fill(x, max(top, start), w, yy-max(top, start), t.Raised())
-			c.text(x, max(top, start), x+1, "▎", Style{FG: t.Agent(ai)})
+			c.text(x, max(top, start), x+1, "▎", Style{FG: m.color(ai)})
 		}
 		for k := len(lines) - 1; k >= 0; k-- {
 			ry := start + k
@@ -954,12 +1011,25 @@ func (m *Model) drawSplitPane(c *Canvas, x, y, w, h, i int) paneInfo {
 	t := &m.theme
 	fi := m.focusIndex()
 	fol := i != fi || m.following()
-	logH := min(6, max(2, h/4))
-	codeH := max(1, h-2-logH)
-	info := m.drawCode(c, "p"+strconv.Itoa(i), i, fol, x, y+1, w, codeH)
+	// The pane has the title row, the code, and the activity log with its
+	// title row. A short pane makes the log smaller first, and then drops it,
+	// so that nothing goes into the next pane.
+	logH := min(min(6, max(2, h/4)), h-3)
+	actH := 0
+	if logH > 0 {
+		actH = 1 + logH
+	}
+	codeH := max(0, h-1-actH)
+	info := m.drawCode(c, "p"+m.snap.Agents[i].Key, i, fol, x, y+1, w, codeH)
 	m.drawWinbar(c, x, y, w, info, i, fol, true)
+	if i != fi {
+		m.addZone(x, y, w, h, func() tea.Cmd { return m.pin(i) })
+	}
+	if actH == 0 {
+		return info
+	}
 	ay := y + 1 + codeH
-	c.fill(x, ay, w, h-1-codeH, t.Sunk())
+	c.fill(x, ay, w, actH, t.Sunk())
 	cx := c.text(x+1, ay, x+w-1, "ACTIVITY", Style{FG: t.Dim(), Bold: true}) + 1
 	c.text(cx, ay, x+w-1, clip(m.snap.Agents[i].Task(), x+w-1-cx), Style{FG: t.Dim()})
 	a := &m.snap.Agents[i]
@@ -967,7 +1037,8 @@ func (m *Model) drawSplitPane(c *Canvas, x, y, w, h, i int) paneInfo {
 	for j := len(a.Events) - 1; j >= 0 && len(rows) < logH; j-- {
 		e := &a.Events[j]
 		for k := len(e.Output) - 1; k >= 0 && len(rows) < logH; k-- {
-			rows = append(rows, logEntry{text: expandTabs(e.Output[k], 0), tc: m.cls(e.Output[k])})
+			l := stripEsc(e.Output[k])
+			rows = append(rows, logEntry{text: expandTabs(l, 0), tc: m.cls(l)})
 		}
 		if len(rows) < logH {
 			rows = append(rows, m.logEntry(i, e))
@@ -981,13 +1052,12 @@ func (m *Model) drawSplitPane(c *Canvas, x, y, w, h, i int) paneInfo {
 		c.text(x+15, yy, x+w-1, clip(le.text, w-16), Style{FG: le.tc})
 		yy++
 	}
-	if i != fi {
-		m.addZone(x, y, w, h, func() tea.Cmd { return m.pin(i) })
-	}
 	return info
 }
 
-func (m *Model) drawTabs(c *Canvas, cur string) {
+// drawTabs draws the top bar: the agents when the sidebar does not show,
+// the buffers, the project and the clock.
+func (m *Model) drawTabs(c *Canvas, cur string, agents bool) {
 	t := &m.theme
 	c.fill(0, 0, m.w, 1, t.Deep())
 	clock := m.now.Format("15:04:05")
@@ -1002,6 +1072,12 @@ func (m *Model) drawTabs(c *Canvas, cur string) {
 	rx := m.w - 1 - width(right)
 	c.text(rx, 0, m.w, where, Style{FG: t.Dim()})
 	c.text(rx+width(where)+2, 0, m.w, clock, Style{FG: t.FG()})
+	// end is the column of the space before the project name.
+	end := rx - 1
+	x0 := 0
+	if agents {
+		x0 = m.drawAgentStrip(c, end/2)
+	}
 
 	tabs := m.tabs
 	if cur != "" && !contains(tabs, cur) {
@@ -1037,14 +1113,17 @@ func (m *Model) drawTabs(c *Canvas, cur string) {
 		v.w += len(v.dots) * 2
 		tv = append(tv, v)
 	}
-	// Drop tabs from the start until the active tab fits.
-	limit := rx - 1
+	// Drop tabs from the start until the active tab fits before the mark of
+	// the cut. A mark shows the dropped tabs.
 	start := 0
 	for {
-		x, fits := 0, true
+		x, fits := x0, true
+		if start > 0 {
+			x += 2
+		}
 		for k := start; k < len(tv); k++ {
 			x += tv[k].w
-			if tv[k].path == cur && x > limit {
+			if tv[k].path == cur && x > end-1 {
 				fits = false
 			}
 		}
@@ -1053,7 +1132,21 @@ func (m *Model) drawTabs(c *Canvas, cur string) {
 		}
 		start++
 	}
-	x := 0
+	x := x0
+	if start > 0 {
+		c.text(x, 0, end, "…", Style{FG: t.Faint()})
+		x += 2
+	}
+	total := x
+	for _, v := range tv[start:] {
+		total += v.w
+	}
+	// Tabs that do not fit stop 1 column before the space, and a mark
+	// shows the cut.
+	limit, cut := end, total > end
+	if cut {
+		limit = end - 1
+	}
 	for _, v := range tv[start:] {
 		if x >= limit {
 			break
@@ -1069,16 +1162,67 @@ func (m *Model) drawTabs(c *Canvas, cur string) {
 			cx = c.text(cx+1, 0, limit, "+", Style{FG: t.Mod()})
 		}
 		for _, i := range v.dots {
-			cx = c.text(cx+1, 0, limit, "●", Style{FG: t.Agent(i)})
+			cx = c.text(cx+1, 0, limit, "●", Style{FG: m.color(i)})
 		}
-		end := x + v.w - 1
-		if end < limit {
-			c.put(end, 0, "│", 1, Style{FG: t.Border()})
+		if sep := x + v.w - 1; sep < limit {
+			c.put(sep, 0, "│", 1, Style{FG: t.Border()})
 		}
 		p := v.path
-		m.addZone(x, 0, v.w, 1, func() tea.Cmd { m.openFile(p); return nil })
+		m.addZone(x, 0, min(v.w, limit-x), 1, func() tea.Cmd { m.openFile(p); return nil })
 		x += v.w
 	}
+	if cut && limit >= x0 {
+		c.text(limit, 0, end, "…", Style{FG: t.Faint()})
+	}
+}
+
+// drawAgentStrip draws the agents in the top bar, for a layout without the
+// sidebar. Each agent shows its status glyph and its tag, and the focused
+// agent shows in reverse. When the agents do not fit before column maxX, a
+// count tells how many more there are. It returns the column after the
+// agents.
+func (m *Model) drawAgentStrip(c *Canvas, maxX int) int {
+	t := &m.theme
+	n := len(m.snap.Agents)
+	if n == 0 {
+		return 0
+	}
+	ws := make([]int, n)
+	for i := range n {
+		g, _ := m.glyph(i)
+		ws[i] = width(g) + width(m.tag(i)) + 3
+	}
+	k, used := 0, 0
+	for k < n {
+		rest := 0
+		if k+1 < n {
+			rest = width("+"+strconv.Itoa(n-k-1)) + 2
+		}
+		if used+ws[k]+rest > maxX {
+			break
+		}
+		used += ws[k]
+		k++
+	}
+	fi := m.focusIndex()
+	x := 0
+	for i := range k {
+		g, gc := m.glyph(i)
+		if i == fi {
+			c.text(x, 0, x+ws[i], " "+g+" "+m.tag(i)+" ", Style{FG: m.color(i), Bold: true, Reverse: true})
+		} else {
+			c.text(x+1, 0, x+ws[i], g, Style{FG: gc})
+			c.text(x+2+width(g), 0, x+ws[i], m.tag(i), Style{FG: m.color(i), Bold: true})
+		}
+		m.addZone(x, 0, ws[i], 1, func() tea.Cmd { return m.pin(i) })
+		x += ws[i]
+	}
+	if k < n {
+		more := "+" + strconv.Itoa(n-k)
+		x = c.text(x+1, 0, max(x+1, maxX), more, Style{FG: t.Faint()}) + 1
+	}
+	c.put(x, 0, "│", 1, Style{FG: t.Border()})
+	return x + 1
 }
 
 func contains(list []string, s string) bool {
@@ -1101,10 +1245,10 @@ func (m *Model) drawStatus(c *Canvas, y int, fp paneInfo) {
 	case fol:
 		mode = "FOLLOW"
 		if fi >= 0 {
-			modeC = t.Agent(fi)
+			modeC = m.color(fi)
 		}
 	case m.histAt(fi) >= 0:
-		mode, modeC = "HISTORY", t.Agent(fi)
+		mode, modeC = "HISTORY", m.color(fi)
 	}
 	// Right side, from the right edge.
 	pct := "All"
@@ -1172,8 +1316,8 @@ func (m *Model) drawStatus(c *Canvas, y int, fp paneInfo) {
 	// Left side.
 	lx := c.text(0, y, x, " "+mode+" ", Style{FG: modeC, Reverse: true, Bold: true})
 	if fi >= 0 {
-		a := " " + tag(fi) + " " + m.snap.Agents[fi].Name + " "
-		lx = c.text(lx, y, x, a, Style{FG: t.Agent(fi), BG: t.Seg()})
+		a := " " + m.tag(fi) + " " + m.snap.Agents[fi].Name + " "
+		lx = c.text(lx, y, x, a, Style{FG: m.color(fi), BG: t.Seg()})
 	}
 	file := "[No Name]"
 	if fp.file != "" {
@@ -1182,7 +1326,7 @@ func (m *Model) drawStatus(c *Canvas, y int, fp paneInfo) {
 			file += " [+]"
 		}
 	}
-	c.text(lx+1, y, x-1, clip(file, x-2-lx), Style{FG: t.FG()})
+	c.text(lx+1, y, x-1, clipLeft(file, x-2-lx), Style{FG: t.FG()})
 }
 
 func (m *Model) drawMsg(c *Canvas, y int) {
