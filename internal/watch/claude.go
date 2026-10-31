@@ -13,14 +13,18 @@ import (
 // Claude Code writes one JSONL transcript per session to
 // ~/.claude/projects/<encoded cwd>/<session>.jsonl. Subagents write to
 // <session>/subagents/agent-<id>.jsonl next to a .meta.json file.
-type claude struct{ dir string }
+type claude struct {
+	dir    string
+	files  logCache
+	walked time.Time
+}
 
 func newClaude() *claude {
 	dir := os.Getenv("CLAUDE_CONFIG_DIR")
 	if dir == "" {
 		dir = filepath.Join(home(), ".claude")
 	}
-	return &claude{dir: filepath.Join(dir, "projects")}
+	return &claude{dir: filepath.Join(dir, "projects"), files: logCache{}}
 }
 
 func (c *claude) close() {}
@@ -29,13 +33,22 @@ var nonAlnum = regexp.MustCompile(`[^A-Za-z0-9]`)
 
 func (c *claude) scan(w *Watcher, cutoff time.Time) {
 	prefix := nonAlnum.ReplaceAllString(w.opt.Root, "-")
+	walk := walkDue(&c.walked)
 	dirs, _ := os.ReadDir(c.dir)
 	for _, d := range dirs {
 		name := d.Name()
-		if !d.IsDir() || (!w.opt.All && name != prefix && !strings.HasPrefix(name, prefix+"-")) {
+		if !d.IsDir() {
 			continue
 		}
 		pdir := filepath.Join(c.dir, name)
+		if !w.opt.All && name != prefix && !strings.HasPrefix(name, prefix+"-") {
+			// The directory belongs to another project. The count of its
+			// sessions changes slowly, so only a walk updates it.
+			if walk {
+				c.away(pdir, cutoff)
+			}
+			continue
+		}
 		mains, _ := filepath.Glob(filepath.Join(pdir, "*.jsonl"))
 		subs, _ := filepath.Glob(filepath.Join(pdir, "*", "subagents", "agent-*.jsonl"))
 		for _, f := range append(mains, subs...) {
@@ -44,23 +57,46 @@ func (c *claude) scan(w *Watcher, cutoff time.Time) {
 				continue
 			}
 			st, err := os.Stat(f)
-			if err != nil || st.ModTime().Before(cutoff) {
+			if err != nil || st.ModTime().Before(cutoff) || w.parkedLog(key, st.ModTime()) {
 				continue
 			}
-			cwd := claudeCwd(f)
-			if !w.inRoot(cwd) {
+			info := c.files[f]
+			if info.cwd == "" {
+				if info.cwd = claudeCwd(f); info.cwd == "" {
+					continue
+				}
+			}
+			info.mod, info.away = st.ModTime(), !w.inRoot(info.cwd)
+			c.files[f] = info
+			if info.away {
 				continue
 			}
 			h := &claudeHandle{t: tail{path: f, start: w.opt.Tail}}
 			s := newSession(key, "claude", h)
-			s.Cwd = cwd
-			if strings.Contains(f, string(filepath.Separator)+"subagents"+string(filepath.Separator)) {
+			s.Cwd = info.cwd
+			if isClaudeSub(f) {
 				h.sub = true
 				subagentMeta(s, f)
 			}
-			w.add(s)
+			w.add(s, info.mod)
 		}
 	}
+	w.away["claude"] = c.files.count(cutoff, func(f string) bool { return !isClaudeSub(f) })
+}
+
+// away records the main transcripts with a write at or after cutoff in the
+// directory of another project.
+func (c *claude) away(pdir string, cutoff time.Time) {
+	mains, _ := filepath.Glob(filepath.Join(pdir, "*.jsonl"))
+	for _, f := range mains {
+		if st, err := os.Stat(f); err == nil && !st.ModTime().Before(cutoff) {
+			c.files[f] = logInfo{away: true, mod: st.ModTime()}
+		}
+	}
+}
+
+func isClaudeSub(f string) bool {
+	return strings.Contains(f, string(filepath.Separator)+"subagents"+string(filepath.Separator))
 }
 
 var cwdRe = regexp.MustCompile(`"cwd":"((?:[^"\\]|\\.)*)"`)
@@ -144,6 +180,7 @@ type claudeBlock struct {
 }
 
 func (h *claudeHandle) poll(s *session) error {
+	defer func() { s.seen(h.t.mod) }()
 	return h.t.lines(func(b []byte) { h.line(s, b) })
 }
 

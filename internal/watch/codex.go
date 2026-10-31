@@ -5,52 +5,81 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
 
 // Codex writes one JSONL rollout per thread to
-// ~/.codex/sessions/YYYY/MM/DD/rollout-<time>-<id>.jsonl.
-type codex struct{ dir string }
+// ~/.codex/sessions/YYYY/MM/DD/rollout-<time>-<id>.jsonl. A resumed thread
+// appends to its first rollout, which can be in an old date folder.
+type codex struct {
+	dir    string
+	files  logCache
+	walked time.Time
+}
 
 func newCodex() *codex {
 	dir := os.Getenv("CODEX_HOME")
 	if dir == "" {
 		dir = filepath.Join(home(), ".codex")
 	}
-	return &codex{dir: filepath.Join(dir, "sessions")}
+	return &codex{dir: filepath.Join(dir, "sessions"), files: logCache{}}
 }
 
 func (c *codex) close() {}
 
 func (c *codex) scan(w *Watcher, cutoff time.Time) {
-	now := time.Now()
-	for d := cutoff.AddDate(0, 0, -1); !d.After(now.AddDate(0, 0, 1)); d = d.AddDate(0, 0, 1) {
-		files, _ := filepath.Glob(filepath.Join(c.dir, d.Format("2006/01/02"), "rollout-*.jsonl"))
-		for _, f := range files {
-			key := "codex:" + f
-			if w.has(key) {
-				continue
-			}
-			st, err := os.Stat(f)
-			if err != nil || st.ModTime().Before(cutoff) {
-				continue
-			}
-			head := headLine(f, 1<<20)
-			m := cwdRe.FindSubmatch(head)
-			if m == nil {
-				continue
-			}
-			var cwd string
-			if json.Unmarshal(append(append([]byte{'"'}, m[1]...), '"'), &cwd) != nil || !w.inRoot(cwd) {
-				continue
-			}
-			s := newSession(key, "codex", &codexHandle{t: tail{path: f, start: w.opt.Tail}, procs: map[string]string{}, polls: map[string]string{}})
-			s.Cwd = cwd
-			s.CtxMax = 272_000
-			w.add(s)
+	var files []string
+	if walkDue(&c.walked) {
+		// Walk all date folders to find resumed threads.
+		files, _ = filepath.Glob(filepath.Join(c.dir, "*", "*", "*", "rollout-*.jsonl"))
+	} else {
+		now := time.Now()
+		for d := cutoff.AddDate(0, 0, -1); !d.After(now.AddDate(0, 0, 1)); d = d.AddDate(0, 0, 1) {
+			day, _ := filepath.Glob(filepath.Join(c.dir, d.Format("2006/01/02"), "rollout-*.jsonl"))
+			files = append(files, day...)
 		}
 	}
+	for _, f := range files {
+		key := "codex:" + f
+		if w.has(key) {
+			continue
+		}
+		st, err := os.Stat(f)
+		if err != nil || st.ModTime().Before(cutoff) || w.parkedLog(key, st.ModTime()) {
+			continue
+		}
+		info := c.files[f]
+		if info.cwd == "" {
+			if info.cwd = codexCwd(f); info.cwd == "" {
+				continue
+			}
+		}
+		info.mod, info.away = st.ModTime(), !w.inRoot(info.cwd)
+		c.files[f] = info
+		if info.away {
+			continue
+		}
+		s := newSession(key, "codex", &codexHandle{t: tail{path: f, start: w.opt.Tail}, procs: map[string]string{}, polls: map[string]string{}})
+		s.Cwd = info.cwd
+		s.CtxMax = 272_000
+		w.add(s, info.mod)
+	}
+	w.away["codex"] = c.files.count(cutoff, nil)
+}
+
+// codexCwd finds the working directory in the session record of a rollout.
+func codexCwd(path string) string {
+	m := cwdRe.FindSubmatch(headLine(path, 1<<20))
+	if m == nil {
+		return ""
+	}
+	var cwd string
+	if json.Unmarshal(append(append([]byte{'"'}, m[1]...), '"'), &cwd) != nil {
+		return ""
+	}
+	return cwd
 }
 
 type codexHandle struct {
@@ -103,6 +132,7 @@ type codexPayload struct {
 }
 
 func (h *codexHandle) poll(s *session) error {
+	defer func() { s.seen(h.t.mod) }()
 	return h.t.lines(func(b []byte) { h.line(s, b) })
 }
 
@@ -222,20 +252,29 @@ func (h *codexHandle) output(s *session, t time.Time, id, out string) {
 					e = &s.Events[i]
 				}
 			}
-			e.Output = append(e.Output, outputLines(afterOutput(out))...)
-			if exitRe.MatchString(out) {
-				runResult(e, strings.Join(e.Output, "\n")+"\n"+out, -1, false)
+			e.Output = appendOutput(e.Output, outputLines(afterOutput(out)))
+			if m := exitRe.FindStringSubmatch(beforeOutput(out)); m != nil {
+				code, _ := strconv.Atoi(m[1])
+				finishRun(e, e.Output, code)
+				// The other parts of the command, such as a read before
+				// it, end with it.
+				for _, i := range ix {
+					if x := &s.Events[i]; x.Result == Pending {
+						x.Result = OK
+					}
+				}
 				delete(h.procs, sid)
 			}
 		}
 		s.touch(t)
 		return
 	}
+	head := beforeOutput(out)
 	idx := s.call(id)
 	for _, i := range idx {
 		e := &s.Events[i]
 		if e.Kind == KindRun || e.Kind == KindRead || e.Kind == KindGrep {
-			if m := runningRe.FindStringSubmatch(out); m != nil && !exitRe.MatchString(out) {
+			if m := runningRe.FindStringSubmatch(head); m != nil && !exitRe.MatchString(head) {
 				h.procs[m[1]] = id
 				e.Output = outputLines(afterOutput(out))
 				continue
@@ -264,6 +303,15 @@ func afterOutput(out string) string {
 	return out
 }
 
+// beforeOutput returns the header of an exec result, before its output. The
+// header has the exit code. The output can have text that looks like one.
+func beforeOutput(out string) string {
+	if i := strings.Index(out, "\nOutput:\n"); i >= 0 {
+		return out[:i]
+	}
+	return out
+}
+
 func (h *codexHandle) event(s *session, t time.Time, p *codexPayload) {
 	switch p.Type {
 	case "user_message":
@@ -274,8 +322,10 @@ func (h *codexHandle) event(s *session, t time.Time, p *codexPayload) {
 		s.TurnEnded = false
 		s.touch(t)
 	case "task_complete", "turn_complete":
+		h.lastPrompt, h.lastSay = "", ""
 		s.endTurn(t, firstLine(p.LastAgentMessage))
 	case "turn_aborted":
+		h.lastPrompt, h.lastSay = "", ""
 		s.endTurn(t, "interrupted")
 	case "token_count":
 		if p.Info != nil {
@@ -320,7 +370,9 @@ func (h *codexHandle) event(s *session, t time.Time, p *codexPayload) {
 }
 
 // Codex can log the same prompt and reply as a response item and as an
-// event. The handle keeps the last text of each to skip the copy.
+// event. The handle keeps the last text of each in the turn to skip the
+// copy. The end of a turn clears them, so that the user can send the same
+// prompt again.
 func (h *codexHandle) prompt(s *session, t time.Time, text string) {
 	text = strings.TrimSpace(text)
 	if text == "" || text == h.lastPrompt {

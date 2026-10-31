@@ -75,6 +75,7 @@ type Agent struct {
 
 	Started time.Time
 	Updated time.Time
+	Wrote   time.Time // last write to the session log, also by lines without events
 	Events  []Event
 
 	TurnEnded bool
@@ -114,6 +115,7 @@ type Activity struct {
 const (
 	approvalAfter = 20 * time.Second
 	idleAfter     = 10 * time.Minute
+	lostAfter     = 30 * time.Minute // a pending call without a log write for this long has no result
 	lingerFor     = 2 * time.Second
 )
 
@@ -130,23 +132,25 @@ func (a *Agent) Activity(now time.Time) Activity {
 	}
 	if i := a.pending(); i >= 0 {
 		e := &a.Events[i]
-		if e.Approval {
-			act.Status, act.Act, act.Detail = Waiting, "waiting", "on you · approve "+e.Tool
-			return act
-		}
-		switch e.Kind {
-		case KindAsk:
-			act.Status, act.Act, act.Detail = Waiting, "waiting", "on you · "+firstLine(e.Text)
-			return act
-		case KindRun, KindTask, KindWeb:
+		age := now.Sub(e.Time)
+		switch {
+		case e.Approval:
+			act.Status, act.Act, act.Detail = Waiting, "waiting", withAge("on you · approve "+e.Tool, age)
+		case e.Kind == KindAsk:
+			act.Status, act.Act, act.Detail = Waiting, "waiting", withAge("on you · "+firstLine(e.Text), age)
+		case e.Kind == KindRun || e.Kind == KindTask || e.Kind == KindWeb:
+			if now.Sub(a.lastWrite()) >= lostAfter {
+				// The agent stopped, for example when the user closed its
+				// terminal, and the call never got a result.
+				act.Status, act.Act, act.Detail = Done, "idle", "no result · "+detailOf(e)
+				return act
+			}
+			act.Status, act.Act, act.Detail = Active, actOf(e.Kind), withAge(detailOf(e), age)
+		case age > approvalAfter:
+			act.Status, act.Act, act.Detail = Waiting, "waiting", withAge("on you · approve "+e.Tool, age)
+		default:
 			act.Status, act.Act, act.Detail = Active, actOf(e.Kind), detailOf(e)
-			return act
 		}
-		if now.Sub(e.Time) > approvalAfter {
-			act.Status, act.Act, act.Detail = Waiting, "waiting", "on you · approve "+e.Tool
-			return act
-		}
-		act.Status, act.Act, act.Detail = Active, actOf(e.Kind), detailOf(e)
 		return act
 	}
 	if now.Sub(a.Updated) > idleAfter {
@@ -168,6 +172,23 @@ func (a *Agent) Activity(now time.Time) Activity {
 		act.Detail = "…"
 	}
 	return act
+}
+
+// lastWrite returns the time of the last write to the session log.
+func (a *Agent) lastWrite() time.Time {
+	if a.Wrote.After(a.Updated) {
+		return a.Wrote
+	}
+	return a.Updated
+}
+
+// withAge puts the age of a call before its detail, when the call is one
+// minute old or older.
+func withAge(detail string, age time.Duration) string {
+	if age < time.Minute {
+		return detail
+	}
+	return Ago(age) + " · " + detail
 }
 
 // pending returns the index of the last tool call without a result in the

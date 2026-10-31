@@ -18,8 +18,9 @@ import (
 // results answer. omp repeats each toolCall in a custom tool_execution_start
 // record, which this reader ignores.
 type omp struct {
-	dir  string
-	skip map[string]bool // transcripts that belong to another project
+	dir    string
+	files  logCache // transcripts that belong to another project
+	walked time.Time
 }
 
 func newOmp() *omp {
@@ -31,21 +32,36 @@ func newOmp() *omp {
 		}
 		dir = filepath.Join(base, "sessions")
 	}
-	return &omp{dir: dir, skip: map[string]bool{}}
+	return &omp{dir: filepath.Clean(dir), files: logCache{}}
 }
 
 func (o *omp) close() {}
 
 func (o *omp) scan(w *Watcher, cutoff time.Time) {
+	walk := walkDue(&o.walked)
 	mains, _ := filepath.Glob(filepath.Join(o.dir, "*", "*.jsonl"))
 	subs, _ := filepath.Glob(filepath.Join(o.dir, "*", "*", "*.jsonl"))
 	for _, f := range append(mains, subs...) {
 		key := "omp:" + f
-		if w.has(key) || o.skip[f] {
+		if w.has(key) {
+			continue
+		}
+		info, away := o.files[f]
+		if away && !walk {
+			// The transcript belongs to another project. Only a walk
+			// updates its time.
 			continue
 		}
 		st, err := os.Stat(f)
 		if err != nil || st.ModTime().Before(cutoff) {
+			continue
+		}
+		if away {
+			info.mod = st.ModTime()
+			o.files[f] = info
+			continue
+		}
+		if w.parkedLog(key, st.ModTime()) {
 			continue
 		}
 		cwd, parent := ompMeta(f)
@@ -54,7 +70,7 @@ func (o *omp) scan(w *Watcher, cutoff time.Time) {
 			// The session record is not written yet.
 			continue
 		case !w.inRoot(cwd):
-			o.skip[f] = true
+			o.files[f] = logInfo{cwd: cwd, away: true, mod: st.ModTime()}
 			continue
 		}
 		h := &ompHandle{t: tail{path: f, start: w.opt.Tail}, jobs: map[string]string{}}
@@ -64,8 +80,9 @@ func (o *omp) scan(w *Watcher, cutoff time.Time) {
 			s.Parent = "omp:" + parent
 			s.Name = strings.TrimSuffix(filepath.Base(f), ".jsonl")
 		}
-		w.add(s)
+		w.add(s, st.ModTime())
 	}
+	w.away["omp"] = o.files.count(cutoff, func(f string) bool { return filepath.Dir(filepath.Dir(f)) == o.dir })
 }
 
 // ompMeta reads the project directory and the parent session from the session
@@ -131,6 +148,7 @@ type ompBlock struct {
 }
 
 func (h *ompHandle) poll(s *session) error {
+	defer func() { s.seen(h.t.mod) }()
 	return h.t.lines(func(b []byte) { h.record(s, b) })
 }
 

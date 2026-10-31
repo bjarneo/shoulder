@@ -72,20 +72,30 @@ func (o *opencode) scan(w *Watcher, cutoff time.Time) {
 		}
 		return
 	}
-	rows, err := o.db.Query(`select id, directory, coalesce(parent_id, ''), coalesce(agent, '')
+	rows, err := o.db.Query(`select id, directory, coalesce(parent_id, ''), coalesce(agent, ''), time_updated
 		from session_v2 where time_updated >= ? and time_archived is null`, cutoff.UnixMilli())
 	if err != nil {
 		w.note("opencode", "opencode: "+err.Error())
 		return
 	}
 	defer rows.Close()
+	w.clearNote("opencode")
+	away := 0
 	for rows.Next() {
 		var id, dir, parent, agent string
-		if rows.Scan(&id, &dir, &parent, &agent) != nil || !w.inRoot(dir) {
+		var updated int64
+		if rows.Scan(&id, &dir, &parent, &agent, &updated) != nil {
+			continue
+		}
+		if !w.inRoot(dir) {
+			if dir != "" && parent == "" {
+				away++
+			}
 			continue
 		}
 		key := "opencode:" + id
-		if w.has(key) {
+		mod := time.UnixMilli(updated)
+		if w.has(key) || w.parkedLog(key, mod) {
 			continue
 		}
 		s := newSession(key, "opencode", &opencodeHandle{o: o, id: id, msgs: map[string]*ocMsg{}})
@@ -96,8 +106,9 @@ func (o *opencode) scan(w *Watcher, cutoff time.Time) {
 				s.Name = agent
 			}
 		}
-		w.add(s)
+		w.add(s, mod)
 	}
+	w.away["opencode"] = away
 }
 
 type opencodeHandle struct {
@@ -143,6 +154,7 @@ func (h *opencodeHandle) poll(s *session) error {
 		if rows.Scan(&id, &m.typ, &m.seq, &m.created, &m.updated, &m.data) != nil {
 			continue
 		}
+		s.seen(time.UnixMilli(m.updated))
 		if old, ok := h.msgs[id]; ok && old.updated == m.updated && len(old.data) == len(m.data) {
 			continue
 		}
@@ -155,10 +167,14 @@ func (h *opencodeHandle) poll(s *session) error {
 	if time.Since(h.meta) > scanEvery {
 		h.meta = time.Now()
 		var title string
-		if h.o.db.QueryRow(`select coalesce(title, '') from session_v2 where id = ?`, h.id).Scan(&title) == nil &&
-			title != "" && !strings.HasPrefix(title, "New session") && title != s.Title {
-			s.Title = title
-			s.dirty = true
+		var updated int64
+		if h.o.db.QueryRow(`select coalesce(title, ''), time_updated from session_v2 where id = ?`, h.id).Scan(&title, &updated) == nil {
+			// The scan compares this time with the time of a parked session.
+			s.seen(time.UnixMilli(updated))
+			if title != "" && !strings.HasPrefix(title, "New session") && title != s.Title {
+				s.Title = title
+				s.dirty = true
+			}
 		}
 	}
 	if changed {

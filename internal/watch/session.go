@@ -20,6 +20,7 @@ type session struct {
 	calls map[string][]int
 	h     handle
 	dirty bool
+	mod   time.Time // the newest write to the log that the watcher saw
 }
 
 // handle reads new data for one session.
@@ -59,6 +60,19 @@ func (s *session) touch(t time.Time) {
 		s.Started = t
 	}
 	s.dirty = true
+}
+
+// seen records the time of a write to the log. Only the check for a lost
+// tool call uses this time, so a change of less than a minute does not make
+// a new snapshot.
+func (s *session) seen(t time.Time) {
+	if !t.After(s.mod) {
+		return
+	}
+	s.mod = t
+	if t.Sub(s.Wrote) >= time.Minute {
+		s.dirty = true
+	}
 }
 
 // call returns the indexes of the events of a tool call.
@@ -127,6 +141,7 @@ type tail struct {
 	off     int64
 	partial []byte
 	started bool
+	mod     time.Time // the modification time at the last call
 }
 
 // lines calls fn for each new complete line. At the first call it skips all
@@ -142,6 +157,7 @@ func (t *tail) lines(fn func([]byte)) error {
 		return err
 	}
 	size := st.Size()
+	t.mod = st.ModTime()
 	if size < t.off {
 		// The file was truncated or replaced.
 		t.off, t.partial, t.started = 0, nil, false

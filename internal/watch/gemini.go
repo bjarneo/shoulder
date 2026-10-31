@@ -15,14 +15,18 @@ import (
 // directory is a short name with a .project_root file, or the SHA-256 of the
 // project path in older versions. Current versions append JSONL records with
 // $set, $patch and $rewindTo updates. Older versions rewrite one JSON file.
-type gemini struct{ dir string }
+type gemini struct {
+	dir    string
+	files  logCache // chats of other projects
+	walked time.Time
+}
 
 func newGemini() *gemini {
 	base := filepath.Join(home(), ".gemini")
 	if h := os.Getenv("GEMINI_CLI_HOME"); h != "" {
 		base = filepath.Join(h, ".gemini")
 	}
-	return &gemini{dir: filepath.Join(base, "tmp")}
+	return &gemini{dir: filepath.Join(base, "tmp"), files: logCache{}}
 }
 
 func (g *gemini) close() {}
@@ -30,21 +34,32 @@ func (g *gemini) close() {}
 func (g *gemini) scan(w *Watcher, cutoff time.Time) {
 	sum := sha256.Sum256([]byte(w.opt.Root))
 	hash := hex.EncodeToString(sum[:])
+	walk := walkDue(&g.walked)
 	dirs, _ := os.ReadDir(g.dir)
 	for _, d := range dirs {
 		if !d.IsDir() {
 			continue
 		}
 		pdir := filepath.Join(g.dir, d.Name())
+		chats := filepath.Join(pdir, "chats")
+		root := ""
+		if b, err := os.ReadFile(filepath.Join(pdir, ".project_root")); err == nil {
+			root = strings.TrimSpace(string(b))
+		}
 		cwd := ""
-		if b, err := os.ReadFile(filepath.Join(pdir, ".project_root")); err == nil && w.inRoot(strings.TrimSpace(string(b))) {
-			cwd = strings.TrimSpace(string(b))
-		} else if d.Name() == hash {
+		switch {
+		case w.inRoot(root):
+			cwd = root
+		case d.Name() == hash:
 			cwd = w.opt.Root
-		} else {
+		default:
+			// The directory belongs to another project, or to an unknown
+			// one. Only a walk updates the count of its chats.
+			if root != "" && walk {
+				g.away(chats, cutoff)
+			}
 			continue
 		}
-		chats := filepath.Join(pdir, "chats")
 		files, _ := filepath.Glob(filepath.Join(chats, "session-*.json*"))
 		subs, _ := filepath.Glob(filepath.Join(chats, "*", "*.jsonl"))
 		for _, f := range append(files, subs...) {
@@ -53,7 +68,7 @@ func (g *gemini) scan(w *Watcher, cutoff time.Time) {
 				continue
 			}
 			st, err := os.Stat(f)
-			if err != nil || st.ModTime().Before(cutoff) {
+			if err != nil || st.ModTime().Before(cutoff) || w.parkedLog(key, st.ModTime()) {
 				continue
 			}
 			h := &geminiHandle{path: f, legacy: strings.HasSuffix(f, ".json"), t: tail{path: f, start: w.opt.Tail}, msgs: map[string]*gemMsg{}}
@@ -63,7 +78,22 @@ func (g *gemini) scan(w *Watcher, cutoff time.Time) {
 			if filepath.Dir(f) != chats {
 				s.Name = "subagent"
 			}
-			w.add(s)
+			w.add(s, st.ModTime())
+		}
+	}
+	w.away["gemini"] = g.files.count(cutoff, nil)
+}
+
+// away records the main chats with a write at or after cutoff in the chats
+// directory of another project.
+func (g *gemini) away(chats string, cutoff time.Time) {
+	files, _ := filepath.Glob(filepath.Join(chats, "session-*.json*"))
+	for _, f := range files {
+		if !strings.HasSuffix(f, ".json") && !strings.HasSuffix(f, ".jsonl") {
+			continue
+		}
+		if st, err := os.Stat(f); err == nil && !st.ModTime().Before(cutoff) {
+			g.files[f] = logInfo{away: true, mod: st.ModTime()}
 		}
 	}
 }
@@ -72,7 +102,8 @@ type geminiHandle struct {
 	path   string
 	legacy bool
 	t      tail
-	mtime  time.Time
+	mtime  time.Time // the modification time of a legacy file at the last read
+	size   int64     // the bytes of a legacy file at the last read
 	msgs   map[string]*gemMsg
 	order  []string
 	last   time.Time // time of the last change
@@ -119,15 +150,18 @@ func (h *geminiHandle) poll(s *session) error {
 		if err != nil {
 			return err
 		}
-		if st.ModTime().Equal(h.mtime) {
+		s.seen(st.ModTime())
+		// A rewrite can change the file twice in one tick of the file
+		// clock. The size tells a half-written file from the full one.
+		if st.ModTime().Equal(h.mtime) && st.Size() == h.size {
 			h.maybeEnd(s)
 			return nil
 		}
-		h.mtime = st.ModTime()
 		b, err := os.ReadFile(h.path)
 		if err != nil {
 			return err
 		}
+		h.mtime, h.size = st.ModTime(), int64(len(b))
 		var conv struct {
 			Kind     string    `json:"kind"`
 			Messages []*gemMsg `json:"messages"`
@@ -143,6 +177,7 @@ func (h *geminiHandle) poll(s *session) error {
 				changed = true
 			}
 		})
+		s.seen(h.t.mod)
 		if err != nil {
 			return err
 		}
@@ -333,25 +368,43 @@ func (h *geminiHandle) rebuild(s *session) {
 	}
 }
 
-// maybeEnd ends the turn when the last message is a reply with no open tool
-// calls and the file has been quiet for a moment. Gemini CLI does not log
-// the end of a turn.
+// maybeEnd ends the turn when the file has been quiet for a moment and the
+// last message is a reply with no open tool calls, an error, or a reply with
+// only cancelled tool calls. Gemini CLI does not log the end of a turn.
 func (h *geminiHandle) maybeEnd(s *session) {
 	if s.TurnEnded || len(h.order) == 0 || time.Since(h.last) < 4*time.Second {
 		return
 	}
 	m := h.msgs[h.order[len(h.order)-1]]
-	if m.Type != "gemini" || strings.TrimSpace(partsText(m.Content)) == "" {
+	t := parseTime(m.Timestamp, s.Updated)
+	switch m.Type {
+	case "error":
+		// An error, such as a used-up quota, ends the turn. The text of
+		// the turn end is the error.
+		s.endTurn(t, "")
+		return
+	case "gemini":
+	default:
 		return
 	}
+	cancelled := 0
 	for _, tc := range m.ToolCalls {
 		switch tc.Status {
-		case "success", "error", "cancelled":
+		case "success", "error":
+		case "cancelled":
+			cancelled++
 		default:
 			return
 		}
 	}
-	s.endTurn(parseTime(m.Timestamp, s.Updated), "")
+	switch {
+	case cancelled > 0 && cancelled == len(m.ToolCalls):
+		// Gemini CLI does not send cancelled calls back to the model, so
+		// the turn ends.
+		s.endTurn(t, "interrupted")
+	case strings.TrimSpace(partsText(m.Content)) != "":
+		s.endTurn(t, "")
+	}
 }
 
 var gemOutputRe = regexp.MustCompile(`(?s)Output: (.*?)(?:\n(?:Error|Exit Code|Signal|Background PIDs|Process Group PGID): |$)`)
