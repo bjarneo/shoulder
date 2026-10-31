@@ -4,11 +4,14 @@ package repo
 
 import (
 	"bytes"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -24,6 +27,27 @@ type Repo struct {
 	// baseline for the diff.
 	first map[string][]string
 	tops  map[string]string // the git top level of each directory outside Root
+	sh    *shared
+}
+
+// shared holds the data that Refresh uses from another goroutine. The lock
+// keeps it safe.
+type shared struct {
+	mu sync.Mutex
+	// others holds the top level of each other repository that has a file
+	// with a baseline. Refresh reads the HEAD of each one.
+	others map[string]bool
+	// counts holds the line counts of untracked files from the last Refresh.
+	// Refresh replaces the map and does not change it.
+	counts map[string]lineCount
+}
+
+// lineCount is the number of lines of an untracked file at a modification
+// time and a size.
+type lineCount struct {
+	mtime time.Time
+	size  int64
+	n     int
 }
 
 // State is the git state of the project. Refresh reads it.
@@ -31,11 +55,13 @@ type State struct {
 	Branch  string
 	Head    string
 	Changes map[string]Change // by path relative to Root
+
+	heads map[string]string // the HEAD of each other repository, by top level
 }
 
 // Change is the git status of one file.
 type Change struct {
-	Code byte // 'M' modified, 'A' added or untracked, 'D' deleted, 'R' renamed
+	Code byte // 'M' modified, 'A' added, copied or untracked, 'D' deleted, 'R' renamed
 	Add  int
 	Del  int
 }
@@ -44,7 +70,10 @@ type Change struct {
 // without a baseline from the last commit.
 func Open(dir string) *Repo {
 	dir, _ = filepath.Abs(dir)
-	r := &Repo{Root: dir, files: map[string]*File{}, first: map[string][]string{}, tops: map[string]string{}}
+	r := &Repo{
+		Root: dir, files: map[string]*File{}, first: map[string][]string{}, tops: map[string]string{},
+		sh: &shared{others: map[string]bool{}},
+	}
 	if out, err := git(dir, "rev-parse", "--show-toplevel"); err == nil {
 		r.Root = strings.TrimSpace(out)
 		r.Git = true
@@ -60,9 +89,10 @@ func git(dir string, args ...string) (string, error) {
 }
 
 // Refresh reads the git state. It is safe to call from another goroutine,
-// because it does not change r.
+// because it does not change the fields of r. It uses the shared data only
+// under its lock.
 func (r *Repo) Refresh() State {
-	st := State{Changes: map[string]Change{}}
+	st := State{Changes: map[string]Change{}, heads: r.otherHeads()}
 	if !r.Git {
 		return st
 	}
@@ -79,6 +109,7 @@ func (r *Repo) Refresh() State {
 	if err != nil {
 		return st
 	}
+	var entries []entry
 	fields := strings.Split(out, "\x00")
 	for i := 0; i < len(fields); i++ {
 		f := fields[i]
@@ -86,17 +117,40 @@ func (r *Repo) Refresh() State {
 			continue
 		}
 		x, y, path := f[0], f[1], f[3:]
+		// A rename or a copy, in the index or in the work tree, has the old
+		// path in the next field.
+		if x == 'R' || x == 'C' || y == 'R' || y == 'C' {
+			i++
+		}
+		// git shows an untracked nested repository as a directory with a
+		// slash. It is not a changed file.
+		if strings.HasSuffix(path, "/") {
+			continue
+		}
 		c := Change{Code: 'M'}
 		switch {
 		case x == '?' || x == 'A':
 			c.Code = 'A'
 		case x == 'D' || y == 'D':
 			c.Code = 'D'
-		case x == 'R':
+		case x == 'R' || y == 'R':
 			c.Code = 'R'
-			i++ // the next field is the old path
+		case x == 'C' || y == 'C':
+			c.Code = 'A' // a copy is a new file
 		}
-		st.Changes[path] = c
+		entries = append(entries, entry{path: path, c: c})
+	}
+	statAll(r.Root, entries)
+	added := map[string]fs.FileInfo{}
+	for _, e := range entries {
+		// A submodule is a directory, not a changed file.
+		if e.info != nil && e.info.IsDir() {
+			continue
+		}
+		if e.info != nil && e.c.Code == 'A' {
+			added[e.path] = e.info
+		}
+		st.Changes[e.path] = e.c
 	}
 	if out, err := git(r.Root, "diff", "HEAD", "--numstat", "-z", "--no-renames"); err == nil {
 		for _, rec := range strings.Split(out, "\x00") {
@@ -113,26 +167,147 @@ func (r *Repo) Refresh() State {
 			st.Changes[parts[2]] = c
 		}
 	}
-	for p, c := range st.Changes {
-		if c.Code == 'A' && c.Add == 0 {
-			if b, err := os.ReadFile(filepath.Join(r.Root, p)); err == nil && len(b) < maxSize {
-				c.Add = len(splitLines(b))
-				st.Changes[p] = c
-			}
-		}
-	}
+	r.countLines(st.Changes, added)
 	return st
 }
 
-// Apply stores a state from Refresh. A new HEAD drops the cached baselines.
+// entry is one file of the git status.
+type entry struct {
+	path string
+	c    Change
+	info fs.FileInfo // nil for a deleted file or a file that Stat cannot read
+}
+
+// statAll reads the file info of each entry that is not deleted. A large
+// status has many files, so it uses up to 8 goroutines.
+func statAll(root string, es []entry) {
+	n := len(es)
+	workers := min(runtime.NumCPU(), 8, n/512+1)
+	var wg sync.WaitGroup
+	for w := range workers {
+		lo, hi := n*w/workers, n*(w+1)/workers
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := lo; i < hi; i++ {
+				if es[i].c.Code == 'D' {
+					continue
+				}
+				if info, err := os.Stat(filepath.Join(root, es[i].path)); err == nil {
+					es[i].info = info
+				}
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+// otherHeads returns the HEAD of each other repository that has a file with
+// a baseline, by top level.
+func (r *Repo) otherHeads() map[string]string {
+	r.sh.mu.Lock()
+	tops := make([]string, 0, len(r.sh.others))
+	for t := range r.sh.others {
+		tops = append(tops, t)
+	}
+	r.sh.mu.Unlock()
+	heads := make(map[string]string, len(tops))
+	for _, t := range tops {
+		if out, err := git(t, "rev-parse", "HEAD"); err == nil {
+			heads[t] = strings.TrimSpace(out)
+		}
+	}
+	return heads
+}
+
+// countLines sets the line count of each added file that git diff does not
+// count, such as an untracked file. It reads a file only when the
+// modification time or the size changed since the last Refresh.
+func (r *Repo) countLines(changes map[string]Change, added map[string]fs.FileInfo) {
+	r.sh.mu.Lock()
+	old := r.sh.counts
+	r.sh.mu.Unlock()
+	next := make(map[string]lineCount, len(added))
+	for p, info := range added {
+		c := changes[p]
+		if c.Add > 0 {
+			continue
+		}
+		lc, ok := old[p]
+		if !ok || !lc.mtime.Equal(info.ModTime()) || lc.size != info.Size() {
+			n, ok := fileLines(filepath.Join(r.Root, p), info.Size())
+			if !ok {
+				continue
+			}
+			lc = lineCount{mtime: info.ModTime(), size: info.Size(), n: n}
+		}
+		next[p] = lc
+		c.Add = lc.n
+		changes[p] = c
+	}
+	r.sh.mu.Lock()
+	r.sh.counts = next
+	r.sh.mu.Unlock()
+}
+
+// fileLines returns the number of lines of a file. It gives 0 for a binary
+// file and for a file over maxSize, without a full read. It reports false
+// when it cannot read the file.
+func fileLines(path string, size int64) (int, bool) {
+	if size == 0 || size > maxSize {
+		return 0, true
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return 0, false
+	}
+	if isBinary(b) {
+		return 0, true
+	}
+	n := bytes.Count(b, []byte{'\n'})
+	if len(b) > 0 && b[len(b)-1] != '\n' {
+		n++
+	}
+	return n, true
+}
+
+// isBinary reports whether b has a NUL byte in the first 8000 bytes, as git
+// does.
+func isBinary(b []byte) bool {
+	return bytes.IndexByte(b[:min(len(b), 8000)], 0) >= 0
+}
+
+// Apply stores a state from Refresh. A new HEAD of the project drops all
+// cached baselines. A new HEAD of another repository drops the cached
+// baselines of the files in that repository.
 func (r *Repo) Apply(st State) {
-	if st.Head != r.State.Head {
-		for _, f := range r.files {
+	newHead := st.Head != r.State.Head
+	for _, f := range r.files {
+		other := f.top != "" && f.top != r.Root && st.heads[f.top] != r.State.heads[f.top]
+		if newHead || other {
 			f.baseOK = false
 			f.stamp = time.Time{}
 		}
 	}
 	r.State = st
+}
+
+// repoTop returns the git top level of the repository that holds path, or
+// "" outside git. In the project, a .git between the file and Root marks
+// the top level of a submodule or a nested repository.
+func (r *Repo) repoTop(path string) string {
+	if !r.Inside(path) {
+		return r.topOf(filepath.Dir(path))
+	}
+	for d := filepath.Dir(path); d != r.Root && r.Inside(d); d = filepath.Dir(d) {
+		if _, err := os.Lstat(filepath.Join(d, ".git")); err == nil {
+			return d
+		}
+	}
+	if r.Git {
+		return r.Root
+	}
+	return ""
 }
 
 // topOf returns the git top level of a directory, or "" outside git.
@@ -178,7 +353,7 @@ const (
 
 // Line is one line of the current file with its diff state.
 type Line struct {
-	Text  string
+	Text  string // without the CR of a CRLF line ending
 	State LineState
 	Old   string   // the replaced text of a Changed line
 	Above []string // deleted lines just above this line
@@ -207,10 +382,11 @@ type File struct {
 	stamp   time.Time
 	mtime   time.Time
 	size    int64
+	top     string // the git top level of the baseline, or "" outside git
 	base    []string
 	baseOK  bool
 	hasBase bool
-	raw     []string
+	raw     []string // the lines with a CR at the end of a CRLF line
 	pending []ghost
 }
 
@@ -227,13 +403,23 @@ func (r *Repo) File(path string) *File {
 	}
 	f.stamp = time.Now()
 	st, err := os.Stat(path)
+	gone := err != nil || st.IsDir()
 	baseStale := !f.baseOK
-	if !baseStale && err == nil && st.ModTime().Equal(f.mtime) && st.Size() == f.size {
-		return f
+	if !baseStale {
+		switch {
+		case gone && f.Missing:
+			// The file is still missing.
+			return f
+		case !gone && !f.Missing && st.ModTime().Equal(f.mtime) && st.Size() == f.size:
+			// The file did not change. The check of f.Missing reloads a file
+			// that comes back with the same modification time and size, for
+			// example after mv.
+			return f
+		}
 	}
 	f.Missing, f.Binary, f.TooBig = false, false, false
 	switch {
-	case err != nil || st.IsDir():
+	case gone:
 		f.Missing = true
 		f.raw = nil
 	case st.Size() > maxSize:
@@ -243,9 +429,10 @@ func (r *Repo) File(path string) *File {
 		b, err := os.ReadFile(path)
 		if err != nil {
 			f.Missing = true
+			f.raw = nil
 			break
 		}
-		if bytes.IndexByte(b[:min(len(b), 8000)], 0) >= 0 {
+		if isBinary(b) {
 			f.Binary = true
 			f.raw = nil
 			break
@@ -295,25 +482,28 @@ func changedRange(a, b []string) (int, int, bool) {
 
 // baseline returns the old content of a file: the version in HEAD, or the
 // first content that shoulder saw for a file outside git. It reports false
-// for a file that has no old version. A file in another project uses the
-// HEAD of its own repository.
+// for a file that has no old version. A file in another repository, such as
+// a submodule or another project, uses the HEAD of its own repository.
 func (r *Repo) baseline(path string, f *File) ([]string, bool) {
-	top := ""
-	switch {
-	case r.Inside(path):
-		if r.Git {
-			top = r.Root
-		}
-	default:
-		top = r.topOf(filepath.Dir(path))
-	}
+	top := r.repoTop(path)
+	f.top = top
 	if top != "" {
+		if top != r.Root {
+			r.sh.mu.Lock()
+			r.sh.others[top] = true
+			r.sh.mu.Unlock()
+		}
 		rel, _ := filepath.Rel(top, path)
-		out, err := git(top, "show", "HEAD:"+filepath.ToSlash(rel))
+		// --filters gives the content in the form of the work tree, with the
+		// end-of-line conversion of the repository. Git LFS gives the pointer
+		// and does not download the file.
+		cmd := exec.Command("git", "-C", top, "--no-optional-locks", "cat-file", "--filters", "HEAD:"+filepath.ToSlash(rel))
+		cmd.Env = append(os.Environ(), "GIT_LFS_SKIP_SMUDGE=1")
+		out, err := cmd.Output()
 		if err != nil {
 			return nil, false
 		}
-		return splitLines([]byte(out)), true
+		return splitLines(out), true
 	}
 	if b, ok := r.first[path]; ok {
 		return b, true
@@ -329,7 +519,7 @@ func (f *File) diff() {
 	f.Created = !f.hasBase && !f.Missing
 	if !f.hasBase {
 		for _, t := range f.raw {
-			f.Lines = append(f.Lines, Line{Text: t, State: Added})
+			f.Lines = append(f.Lines, Line{Text: noCR(t), State: Added})
 		}
 		f.Add = len(f.raw)
 		f.hunks()
@@ -347,7 +537,7 @@ func (f *File) diff() {
 		pairs := min(len(dels), len(ins))
 		for i := 0; i < pairs; i++ {
 			l := &f.Lines[ins[i]]
-			l.State, l.Old = Changed, dels[i]
+			l.State, l.Old = Changed, noCR(dels[i])
 			f.Mod++
 		}
 		for _, i := range ins[pairs:] {
@@ -362,7 +552,11 @@ func (f *File) diff() {
 			if len(ins) > 0 {
 				next = ins[len(ins)-1] + 1
 			}
-			f.pending = append(f.pending, ghost{at: next, text: append([]string(nil), rest...)})
+			text := make([]string, len(rest))
+			for i, t := range rest {
+				text[i] = noCR(t)
+			}
+			f.pending = append(f.pending, ghost{at: next, text: text})
 		}
 		dels, ins = dels[:0], ins[:0]
 	}
@@ -371,12 +565,12 @@ func (f *File) diff() {
 		switch o.kind {
 		case opEq:
 			flush()
-			f.Lines = append(f.Lines, Line{Text: f.raw[o.b]})
+			f.Lines = append(f.Lines, Line{Text: noCR(f.raw[o.b])})
 		case opDel:
 			dels = append(dels, f.base[o.a])
 		case opIns:
 			ins = append(ins, len(f.Lines))
-			f.Lines = append(f.Lines, Line{Text: f.raw[o.b]})
+			f.Lines = append(f.Lines, Line{Text: noCR(f.raw[o.b])})
 		}
 	}
 	flush()
@@ -400,7 +594,7 @@ func (f *File) roughDiff() {
 		count[l]++
 	}
 	for _, t := range f.raw {
-		l := Line{Text: t}
+		l := Line{Text: noCR(t)}
 		if count[t] > 0 {
 			count[t]--
 		} else {
@@ -437,10 +631,14 @@ type ghost struct {
 	text []string
 }
 
+// splitLines splits b at each LF. A line of a CRLF file keeps its CR, so
+// that a change of the line endings is a change of the lines.
 func splitLines(b []byte) []string {
 	if len(b) == 0 {
 		return nil
 	}
-	s := strings.ReplaceAll(string(b), "\r\n", "\n")
-	return strings.Split(strings.TrimSuffix(s, "\n"), "\n")
+	return strings.Split(strings.TrimSuffix(string(b), "\n"), "\n")
 }
+
+// noCR returns a line without the CR of a CRLF line ending, for the view.
+func noCR(s string) string { return strings.TrimSuffix(s, "\r") }
