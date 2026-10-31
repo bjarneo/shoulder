@@ -74,7 +74,7 @@ func (w *Watcher) init() {
 	w.away = map[string]int{}
 	w.sentAway = 0
 	w.notes, w.newNotes = map[string]string{}, false
-	w.sources = []source{newClaude(), newCodex(), newGemini(), newOpencode(), newOmp()}
+	w.sources = []source{newClaude(), newCodex(), newGemini(), newOpencode(), newOmp(), newAuggie()}
 }
 
 // Once reads the sessions one time and returns the snapshot, for a caller
