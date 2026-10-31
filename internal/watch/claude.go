@@ -159,6 +159,7 @@ type claudeLine struct {
 }
 
 type claudeMsg struct {
+	Model      string          `json:"model"`
 	StopReason string          `json:"stop_reason"`
 	Content    json.RawMessage `json:"content"`
 	Usage      *struct {
@@ -221,6 +222,13 @@ func (h *claudeHandle) assistant(s *session, t time.Time, m *claudeMsg) {
 	var blocks []claudeBlock
 	if json.Unmarshal(m.Content, &blocks) != nil {
 		return
+	}
+	// A turn can start without a prompt, for example with a task
+	// notification or a message from another agent. Work after the end of
+	// a turn starts a new turn. Claude Code writes a synthetic message, such
+	// as an API error, after the end of a turn too. It does not start one.
+	if s.TurnEnded && len(blocks) > 0 && m.Model != "<synthetic>" {
+		s.TurnEnded = false
 	}
 	hasText := false
 	for _, b := range blocks {

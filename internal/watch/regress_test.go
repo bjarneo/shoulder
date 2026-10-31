@@ -460,3 +460,29 @@ func TestGeminiLegacyRewriteInOneTick(t *testing.T) {
 		t.Fatalf("events: %+v", s.Events)
 	}
 }
+
+func TestClaudeTurnWithoutPrompt(t *testing.T) {
+	h := &claudeHandle{}
+	s := newSession("claude:x", "claude", h)
+	feed(t, h, s,
+		`{"type":"user","cwd":"/w","timestamp":"2026-10-27T10:00:00Z","message":{"role":"user","content":"fix it"}}`,
+		`{"type":"assistant","timestamp":"2026-10-27T10:00:05Z","message":{"content":[{"type":"text","text":"Fixed."}],"stop_reason":"end_turn"}}`,
+		`{"type":"system","subtype":"turn_duration","timestamp":"2026-10-27T10:00:05Z"}`,
+		// A task notification starts the next turn. It is not a prompt.
+		`{"type":"user","timestamp":"2026-10-27T10:01:00Z","message":{"role":"user","content":"<task-notification>\n<task-id>b1</task-id>\n</task-notification>"}}`,
+		`{"type":"user","isMeta":true,"timestamp":"2026-10-27T10:01:00Z","message":{"role":"user","content":"Another Claude session sent a message"}}`,
+		`{"type":"assistant","timestamp":"2026-10-27T10:01:02Z","message":{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"go test ./..."}}]}}`,
+	)
+	if act := s.Activity(time.Date(2026, 10, 27, 10, 1, 3, 0, time.UTC)); act.Status != Active || act.Act != "running" {
+		t.Fatalf("a turn without a prompt: %+v", act)
+	}
+	feed(t, h, s,
+		`{"type":"user","timestamp":"2026-10-27T10:01:04Z","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]}}`,
+		`{"type":"assistant","timestamp":"2026-10-27T10:01:05Z","message":{"content":[{"type":"text","text":"The tests pass."}],"stop_reason":"end_turn"}}`,
+		`{"type":"assistant","timestamp":"2026-10-27T10:01:06Z","message":{"model":"<synthetic>","content":[{"type":"text","text":"API Error"}],"stop_reason":"stop_sequence"}}`,
+	)
+	act := s.Activity(time.Date(2026, 10, 27, 10, 1, 7, 0, time.UTC))
+	if act.Status != Done {
+		t.Fatalf("the second turn does not end: %+v", act)
+	}
+}
