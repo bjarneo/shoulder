@@ -15,3 +15,13 @@ jobs:
           go-version-file: go.mod
       - run: go vet ./...
       - run: go test ./...
+
+  # The Nix build fails when the source fileset misses a file or when
+  # vendorHash does not match go.sum.
+  nix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.0
+      - uses: cachix/install-nix-action@v31
+      - run: nix build --print-build-logs
+      - run: ./result/bin/shoulder --version

@@ -28,13 +28,20 @@
             inherit version;
 
             # Only the Go sources, so edits to the site or demo don't rebuild.
+            # Each .go file is part of the source, so a new file of package
+            # main cannot break the build.
             src = lib.fileset.toSource {
               root = ./.;
               fileset = lib.fileset.unions [
                 ./go.mod
                 ./go.sum
-                ./main.go
                 ./internal
+                (lib.fileset.difference (lib.fileset.fileFilter (file: file.hasExt "go") ./.) (
+                  lib.fileset.unions [
+                    (lib.fileset.maybeMissing ./site)
+                    (lib.fileset.maybeMissing ./demo)
+                  ]
+                ))
               ];
             };
 
