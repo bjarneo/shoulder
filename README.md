@@ -191,7 +191,7 @@ The JSON has the class `waiting`, `active`, `done` or `none`. The tooltip lists 
 To show the agents of the current project in tmux, add this to your tmux configuration:
 
 ```sh
-set -g status-right '#(shoulder status #{pane_current_path})'
+set -g status-right '#(shoulder status #{q:pane_current_path})'
 set -g status-interval 5
 ```
 
