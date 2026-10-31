@@ -2,7 +2,7 @@
 
 **Watch over your agents' shoulder.**
 
-See your coding agents work, live. shoulder follows Claude Code, Codex, Gemini CLI, Auggie, opencode and omp through your project. It shows the file that each agent reads or edits, the diff against your last commit, and the commands that it runs.
+See your coding agents work, live. shoulder follows Claude Code, Codex, Gemini CLI, opencode, omp and Auggie through your project. It shows the file that each agent reads or edits, the diff against your last commit, and the commands that it runs.
 
 [![Claude simplifies snake.js one line at a time while Codex adds tests. shoulder follows both.](site/poster.jpg)](https://bjarneo.github.io/shoulder/)
 
@@ -86,9 +86,9 @@ shoulder reads the session logs that the agents already write. You do not config
 | Claude Code, with subagents | `~/.claude/projects/` | `CLAUDE_CONFIG_DIR` |
 | Codex | `~/.codex/sessions/` | `CODEX_HOME` |
 | Gemini CLI | `~/.gemini/tmp/` | `GEMINI_CLI_HOME` |
-| Auggie (Augment CLI) | `~/.augment/sessions/` | — |
 | opencode 2.x | `~/.local/share/opencode/opencode.db` | `XDG_DATA_HOME` |
 | omp | `~/.omp/agent/sessions/` | `PI_CODING_AGENT_DIR` |
+| Auggie | `~/.augment/sessions/` | not supported, see [Limits](#limits) |
 
 shoulder only reads. It does not send input to an agent, it does not change files, and it does not connect to the network. It opens the opencode database read-only.
 
@@ -294,7 +294,7 @@ In a git repository, shoulder compares each file with `HEAD`. Outside git, it co
 ## Limits
 
 - shoulder reads opencode 2.x. It does not read the older `part` tables of opencode 1.x.
-- For Claude Code, Codex, Auggie, opencode and omp, the approval state is an estimate. See [Agent states](#agent-states).
+- For Claude Code, Codex, opencode, omp and Auggie, the approval state is an estimate. See [Agent states](#agent-states).
 - When omp moves a command to the background, shoulder shows it as running until omp writes the output of the finished job.
 - Auggie saves its session after each model response, so shoulder sees a tool call when the response ends, and its result when the next response ends.
 - shoulder reads Auggie sessions only in `~/.augment/`. It does not find the sessions of an auggie that runs with `--augment-cache-dir`.

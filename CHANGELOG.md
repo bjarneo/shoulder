@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Watch Auggie (Augment CLI) sessions in `~/.augment/sessions/`.
+- Watch Auggie sessions. (#5)
 
 ## v0.3.2 · 2026-10-31
 

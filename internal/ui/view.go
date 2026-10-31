@@ -403,9 +403,9 @@ func (m *Model) drawEmpty(c *Canvas, x, y, w, h, ai int, split bool) {
 	var lines []ln
 	if ai < 0 {
 		watches := "shoulder watches "
-		where, start := watches+clipLeft(m.repo.Root, w-4-width(watches)), "start claude, codex, gemini, auggie, opencode or omp in this project"
+		where, start := watches+clipLeft(m.repo.Root, w-4-width(watches)), "start claude, codex, gemini, opencode, omp or auggie in this project"
 		if m.all {
-			where, start = "shoulder watches all projects", "start claude, codex, gemini, auggie, opencode or omp in any project"
+			where, start = "shoulder watches all projects", "start claude, codex, gemini, opencode, omp or auggie in any project"
 		}
 		lines = []ln{
 			{"no agents yet", Style{FG: t.FG(), Bold: true}},
